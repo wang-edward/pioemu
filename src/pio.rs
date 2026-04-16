@@ -11,62 +11,65 @@ enum Condition {
     OsrNotEmpty,
 }
 
-enum WaitSource {
-    Gpio,
-    Pin,
-    Irq,
-    Reserved,
+mod wait {
+    pub enum Source {
+        Gpio,
+        Pin,
+        Irq,
+        Reserved,
+    }
 }
 
-enum ShiftSource {
-    Pins,
-    X,
-    Y,
-    Null,
-    Reserved1,
-    Reserved2,
-    Isr,
-    Osr,
+mod shift {
+    pub enum Source {
+        Pins,
+        X,
+        Y,
+        Null,
+        Reserved1,
+        Reserved2,
+        Isr,
+        Osr,
+    }
+    pub enum Destn {
+        Pins,
+        X,
+        Y,
+        Null,
+        PinDirs,
+        Pc,
+        Isr,
+        Exec,
+    }
 }
 
-enum ShiftDestn {
-    Pins,
-    X,
-    Y,
-    Null,
-    PinDirs,
-    Pc,
-    Isr,
-    Exec,
-}
-
-enum MovDestn {
-    Pins,
-    X,
-    Y,
-    Reserved,
-    Exec,
-    Pc,
-    Isr,
-    Osr,
-}
-
-enum MovOp {
-    None,
-    Invert,
-    BitReverse,
-    Reserved,
-}
-
-enum MovSource {
-    Pins,
-    X,
-    Y,
-    Null,
-    Reserved,
-    Status,
-    Isr,
-    Osr,
+mod mov {
+    pub enum Source {
+        Pins,
+        X,
+        Y,
+        Null,
+        Reserved,
+        Status,
+        Isr,
+        Osr,
+    }
+    pub enum Destn {
+        Pins,
+        X,
+        Y,
+        Reserved,
+        Exec,
+        Pc,
+        Isr,
+        Osr,
+    }
+    pub enum Op {
+        None,
+        Invert,
+        BitReverse,
+        Reserved,
+    }
 }
 
 enum Instruction {
@@ -75,15 +78,15 @@ enum Instruction {
     },
     Wait {
         polarity: u1,
-        source: WaitSource,
+        source: wait::Source,
         index: u5,
     },
     In {
-        source: ShiftSource,
+        source: shift::Source,
         bit_count: u5, // 0x00 = 32, not 0
     },
     Out {
-        destn: ShiftDestn,
+        destn: shift::Destn,
         bit_count: u5, // 0x00 = 32, not 0
     },
     Push {
@@ -94,7 +97,11 @@ enum Instruction {
         if_empty: u1,
         block: u1,
     },
-    Mov {},
+    Mov {
+        destn: mov::Destn,
+        op: mov::Op,
+        source: mov::Source,
+    },
 }
 
 struct Instr {
