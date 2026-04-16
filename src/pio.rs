@@ -16,9 +16,14 @@ mod shift {
 
 #[rustfmt::skip]
 mod mov {
-    pub enum Source { Pins, X, Y, Null, Reserved, Status, Isr, Osr }
     pub enum Destn { Pins, X, Y, Reserved, Exec, Pc, Isr, Osr }
     pub enum Op { None, Invert, BitReverse, Reserved }
+    pub enum Source { Pins, X, Y, Null, Reserved, Status, Isr, Osr }
+}
+
+#[rustfmt::skip]
+mod set {
+    pub enum Destn { Pins, X, Y, Reserved1, PinDirs, Reserved2, Reserved3, Reserved4 }
 }
 
 enum Instruction {
@@ -50,6 +55,15 @@ enum Instruction {
         destn: mov::Destn,
         op: mov::Op,
         source: mov::Source,
+    },
+    Irq {
+        clear: u1,
+        wait: u1,
+        index: u5,
+    },
+    Set {
+        destn: set::Destn,
+        data: u5,
     },
 }
 
