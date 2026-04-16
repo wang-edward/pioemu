@@ -1,75 +1,24 @@
 use arbitrary_int::{u1, u5};
 
-enum Condition {
-    Always,
-    XZero,
-    XDec,
-    YZero,
-    YDec,
-    XNeqY,
-    Pin,
-    OsrNotEmpty,
-}
+#[rustfmt::skip]
+enum Condition { Always, XZero, XDec, YZero, YDec, XNeqY, Pin, OsrNotEmpty, }
 
+#[rustfmt::skip]
 mod wait {
-    pub enum Source {
-        Gpio,
-        Pin,
-        Irq,
-        Reserved,
-    }
+    pub enum Source { Gpio, Pin, Irq, Reserved }
 }
 
+#[rustfmt::skip]
 mod shift {
-    pub enum Source {
-        Pins,
-        X,
-        Y,
-        Null,
-        Reserved1,
-        Reserved2,
-        Isr,
-        Osr,
-    }
-    pub enum Destn {
-        Pins,
-        X,
-        Y,
-        Null,
-        PinDirs,
-        Pc,
-        Isr,
-        Exec,
-    }
+    pub enum Source { Pins, X, Y, Null, Reserved1, Reserved2, Isr, Osr }
+    pub enum Destn { Pins, X, Y, Null, PinDirs, Pc, Isr, Exec }
 }
 
+#[rustfmt::skip]
 mod mov {
-    pub enum Source {
-        Pins,
-        X,
-        Y,
-        Null,
-        Reserved,
-        Status,
-        Isr,
-        Osr,
-    }
-    pub enum Destn {
-        Pins,
-        X,
-        Y,
-        Reserved,
-        Exec,
-        Pc,
-        Isr,
-        Osr,
-    }
-    pub enum Op {
-        None,
-        Invert,
-        BitReverse,
-        Reserved,
-    }
+    pub enum Source { Pins, X, Y, Null, Reserved, Status, Isr, Osr }
+    pub enum Destn { Pins, X, Y, Reserved, Exec, Pc, Isr, Osr }
+    pub enum Op { None, Invert, BitReverse, Reserved }
 }
 
 enum Instruction {
