@@ -2,9 +2,19 @@ use arbitrary_int::u5;
 use pioemu::pio;
 use pioemu::state;
 
+fn setup(program: &[pio::Instr], en: [bool; 4]) -> state::Block {
+    let mut block = state::Block::new();
+    for (i, instr) in program.iter().enumerate() {
+        block.instr_mem[i] = Some(*instr);
+    }
+    for (i, sm) in block.state_machines.iter_mut().enumerate() {
+        sm.enabled = en[i];
+    }
+    block
+}
+
 #[test]
 fn squarewave() {
-    let mut block = state::Block::new();
     let n = 8;
     let program = [
         pio::Instr {
@@ -24,13 +34,7 @@ fn squarewave() {
         },
     ];
 
-    for (i, instr) in program.iter().enumerate() {
-        block.instr_mem[i] = Some(*instr);
-    }
-
-    for sm in &mut block.state_machines {
-        sm.enabled = true;
-    }
+    let mut block = setup(&program, [true, true, true, true]);
 
     let mut xs: Vec<[u32; 4]> = Vec::new();
     let expected = vec![
