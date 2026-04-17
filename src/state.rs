@@ -54,6 +54,7 @@ pub struct Block {
     pub gpio_out: u32,
     pub gpio_dir: u32,
     pub gpio_in: u32,
+    cycle: u64,
 }
 
 impl Block {
@@ -64,18 +65,33 @@ impl Block {
             gpio_out: 0,
             gpio_dir: 0,
             gpio_in: 0,
+            cycle: 0,
         }
     }
     pub fn step(&mut self) {
-        let Block { state_machines, instr_mem, gpio_out, gpio_dir, gpio_in } = self;
-        for sm in state_machines.iter_mut() {
+        let Block { state_machines, instr_mem, gpio_out, gpio_dir, gpio_in, cycle } = self;
+        for (i, sm) in state_machines.iter_mut().enumerate() {
             if !sm.enabled {
                 continue;
             }
             let pc = sm.state.pc.value() as usize;
             let instr = instr_mem[pc].expect("no instruction at PC");
+
+            if sm.state.delay_counter > 0 {
+                println!(
+                    "[{:>5}] sm{} @{:02}  {:<26} (delay {}) | x={:08x} y={:08x}",
+                    cycle, i, pc, instr, sm.state.delay_counter, sm.state.x, sm.state.y,
+                );
+            } else {
+                println!(
+                    "[{:>5}] sm{} @{:02}  {:<26}           | x={:08x} y={:08x}",
+                    cycle, i, pc, instr, sm.state.x, sm.state.y,
+                );
+            }
+
             sm.execute(&instr, gpio_out, gpio_dir, *gpio_in);
         }
+        *cycle += 1;
     }
 }
 
