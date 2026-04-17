@@ -1,8 +1,8 @@
 use arbitrary_int::u5;
-use pioemu::pio;
+use pioemu::instr;
 use pioemu::state;
 
-fn setup(program: &[pio::Instr], en: [bool; 4]) -> state::Block {
+fn setup(program: &[instr::Instr], en: [bool; 4]) -> state::Block {
     let mut block = state::Block::new();
     for (i, instr) in program.iter().enumerate() {
         block.instr_mem[i] = Some(*instr);
@@ -17,18 +17,18 @@ fn setup(program: &[pio::Instr], en: [bool; 4]) -> state::Block {
 fn squarewave() {
     let n = 8;
     let program = [
-        pio::Instr {
-            instruction: pio::Instruction::Set { destn: pio::set::Destn::X, data: u5::new(1) },
+        instr::Instr {
+            instruction: instr::Instruction::Set { destn: instr::set::Destn::X, data: u5::new(1) },
             delay: u5::new(1),
             side_set: None,
         },
-        pio::Instr {
-            instruction: pio::Instruction::Set { destn: pio::set::Destn::X, data: u5::new(0) },
+        instr::Instr {
+            instruction: instr::Instruction::Set { destn: instr::set::Destn::X, data: u5::new(0) },
             delay: u5::new(0),
             side_set: None,
         },
-        pio::Instr {
-            instruction: pio::Instruction::Jmp { condition: pio::Condition::Always, address: u5::new(0) },
+        instr::Instr {
+            instruction: instr::Instruction::Jmp { condition: instr::Condition::Always, address: u5::new(0) },
             delay: u5::new(0),
             side_set: None,
         },

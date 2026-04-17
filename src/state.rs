@@ -1,4 +1,4 @@
-use crate::pio::{Condition, Instr, Instruction, set};
+use crate::instr::{Condition, Instr, Instruction, set};
 use arbitrary_int::u5;
 use std::collections::VecDeque;
 use std::fmt;
