@@ -83,14 +83,6 @@ impl fmt::Display for Block {
             self.gpio_out, self.gpio_dir, self.gpio_in
         )?;
 
-        // // print loaded program
-        // writeln!(f, "program:")?;
-        // for (i, slot) in self.instr_mem.iter().enumerate() {
-        //     if let Some(instr) = slot {
-        //         writeln!(f, "  {:02}: {}", i, instr)?;
-        //     }
-        // }
-
         // print state machines
         for (i, sm) in self.state_machines.iter().enumerate() {
             writeln!(f, "sm{}: {}", i, sm)?;
@@ -112,28 +104,24 @@ impl Block {
     }
     pub fn step(&mut self) {
         let Block { state_machines, instr_mem, gpio_out, gpio_dir, gpio_in, cycle } = self;
-        for (i, sm) in state_machines.iter_mut().enumerate() {
+        for sm in state_machines {
             if !sm.enabled {
                 continue;
             }
             let pc = sm.state.pc.value() as usize;
             let instr = instr_mem[pc].expect("no instruction at PC");
 
-            // if sm.state.delay_counter > 0 {
-            //     println!(
-            //         "[{:>5}] sm{} @{:02}  {:<26} (delay {}) | x={:08x} y={:08x}",
-            //         cycle, i, pc, instr, sm.state.delay_counter, sm.state.x, sm.state.y,
-            //     );
-            // } else {
-            //     println!(
-            //         "[{:>5}] sm{} @{:02}  {:<26}           | x={:08x} y={:08x}",
-            //         cycle, i, pc, instr, sm.state.x, sm.state.y,
-            //     );
-            // }
-
             sm.execute(&instr, gpio_out, gpio_dir, *gpio_in);
         }
         *cycle += 1;
+    }
+    pub fn print_instr_mem(self) {
+        println!("program:");
+        for (i, slot) in self.instr_mem.iter().enumerate() {
+            if let Some(instr) = slot {
+                println!("  {:02}: {}", i, instr);
+            }
+        }
     }
 }
 
@@ -227,7 +215,7 @@ impl StateMachine {
 }
 
 #[derive(Debug)]
-struct State {
+pub struct State {
     pc: u5,
     // no clock divider, don't think about timing rn
     x: u32,
@@ -290,7 +278,7 @@ enum StatusSel {
 }
 
 #[derive(Debug)]
-struct Config {
+pub struct Config {
     // pinctrl
     out_base: PinRange,
     out_count: Range<0, 32>,
