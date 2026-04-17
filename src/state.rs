@@ -1,4 +1,4 @@
-use crate::instr::{Condition, Instr, Instruction, set};
+use crate::instr::{Condition, Instr, Instruction, set, wait};
 use arbitrary_int::u5;
 use std::collections::VecDeque;
 use std::fmt;
@@ -154,11 +154,13 @@ pub fn wrap_shiftr(x: u32, shift: u8) -> u32 {
 
 impl StateMachine {
     fn execute(&mut self, instr: &Instr, gpio_out: &mut u32, gpio_dir: &mut u32, gpio_in: u32) {
-        if self.state.delay_counter > 0 {
+        if self.state.delay_counter > 0 && !self.state.stalled {
             self.state.delay_counter -= 1;
             return;
         }
+
         let mut advance_pc = true;
+        self.state.stalled = false;
 
         match instr.instruction {
             Instruction::Jmp { condition, address } => {
@@ -206,6 +208,15 @@ impl StateMachine {
                 }
                 _ => panic!(),
             },
+            Instruction::Wait { polarity, source, index } => {
+                let (polarity, index) = (polarity.value() as u32, index.value() as u32);
+                let cond_met = match source {
+                    wait::Source::Gpio => (gpio_in >> index) & 1,
+                    // wait::Source::Pin => (gpio_in >>
+                    _ => panic!(),
+                };
+                // if cond met adavance_pc = false
+            }
             _ => panic!(),
         }
 
