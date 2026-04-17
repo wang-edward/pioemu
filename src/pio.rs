@@ -29,6 +29,7 @@ mod set {
 enum Instruction {
     Jmp {
         condition: Condition,
+        address: u5,
     },
     Wait {
         polarity: u1,
@@ -67,7 +68,7 @@ enum Instruction {
     },
 }
 
-struct Instr {
+pub struct Instr {
     instruction: Instruction,
     delay: u5,
 }

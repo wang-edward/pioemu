@@ -1,0 +1,175 @@
+use crate::pio::Instr;
+use arbitrary_int::u5;
+use std::collections::VecDeque;
+
+#[derive(Clone, Copy)]
+struct Range<const MIN: u8, const MAX: u8>(u8);
+
+impl<const MIN: u8, const MAX: u8> Range<MIN, MAX> {
+    fn new(val: u8) -> Self {
+        assert!(
+            val >= MIN && val <= MAX,
+            "value {val} not in [{MIN}, {MAX}]"
+        );
+        Self(val)
+    }
+
+    fn get(self) -> u8 {
+        self.0
+    }
+}
+type PinRange = Range<0, 31>;
+
+const FIFO_DEPTH: usize = 4;
+struct Fifo {
+    data: VecDeque<u32>,
+    depth: usize, // 4 normally, 8 if joined
+}
+
+impl Fifo {
+    fn new(depth: usize) -> Self {
+        Self {
+            data: VecDeque::with_capacity(depth),
+            depth,
+        }
+    }
+    fn is_full(&self) -> bool {
+        self.data.len() >= self.depth
+    }
+    fn is_empty(&self) -> bool {
+        self.data.is_empty()
+    }
+    fn push(&mut self, val: u32) -> bool {
+        if self.is_full() {
+            return false;
+        }
+        self.data.push_back(val);
+        true
+    }
+    fn pop(&mut self) -> Option<u32> {
+        self.data.pop_front()
+    }
+}
+
+struct Block {
+    instr_mem: [Option<Instr>; 32],
+    state_machines: [StateMachine; 4],
+    gpio_out: u32,
+    gpio_dir: u32,
+    gpio_in: u32,
+}
+
+struct StateMachine {
+    state: State,
+    config: Config,
+    enabled: bool,
+}
+
+struct State {
+    pc: u5,
+    // no clock divider, don't think about timing rn
+    x: u32,
+    y: u32,
+    isr: u32,
+    osr: u32,
+    isr_shift_count: u8,
+    osr_shift_count: u8,
+    tx_fifo: Fifo,
+    rx_fifo: Fifo,
+    delay_counter: u8,
+    stalled: bool,
+}
+
+impl State {
+    fn new() -> Self {
+        Self {
+            pc: u5::new(0),
+            x: 0,
+            y: 0,
+            osr: 0,
+            isr: 0,
+            osr_shift_count: 32, // empty at reset
+            isr_shift_count: 0,
+            tx_fifo: Fifo::new(FIFO_DEPTH),
+            rx_fifo: Fifo::new(FIFO_DEPTH),
+            delay_counter: 0,
+            stalled: false,
+        }
+    }
+}
+
+enum ShiftDir {
+    Left,
+    Right,
+}
+
+enum StatusSel {
+    TxLevel,
+    RxLevel,
+}
+
+struct Config {
+    // pinctrl
+    out_base: PinRange,
+    out_count: Range<0, 32>,
+    set_base: PinRange,
+    set_count: Range<0, 5>,
+    in_base: PinRange,
+    sideset_base: PinRange,
+    sideset_count: Range<0, 5>,
+
+    // execctrl
+    sideset_en: bool,
+    side_pindir: bool,
+    jmp_pin: u5,
+    // out_en_sel: u5,
+    wrap_top: u5,
+    wrap_bottom: u5,
+    status_sel: StatusSel,
+    status_n: Range<0, 15>,
+
+    // shiftctrl
+    pull_thresh: Range<0, 31>,
+    push_thresh: Range<0, 31>,
+    out_shiftdir: ShiftDir,
+    in_shiftdir: ShiftDir,
+    autopull: bool,
+    autopush: bool,
+    fjoin_rx: bool,
+    fjoin_tx: bool,
+    // TODO clkdiv?
+    // clkdiv_int: u16,
+    // clkdiv_frac: u8,
+}
+
+impl Config {
+    // TODO pull_thresh override 32 = 0 and fifo_depth if fjoin
+    fn new() -> Self {
+        Self {
+            out_base: Pin::new(0),
+            out_count: OutCount::new(0),
+            set_base: Pin::new(0),
+            set_count: SetCount::new(5),
+            in_base: Pin::new(0),
+            sideset_base: Pin::new(0),
+            sideset_count: SidesetCount::new(0),
+            sideset_en: false,
+            side_pindir: false,
+            jmp_pin: Pin::new(0),
+            wrap_top: u5::new(0x1f),
+            wrap_bottom: u5::new(0),
+            status_sel: StatusSel::TxLevel,
+            status_n: StatusN::new(0),
+            pull_thresh: Thresh::new(0),
+            push_thresh: Thresh::new(0),
+            out_shiftdir: true,
+            in_shiftdir: true,
+            autopull: false,
+            autopush: false,
+            fjoin_rx: false,
+            fjoin_tx: false,
+            clkdiv_int: 1,
+            clkdiv_frac: 0,
+        }
+    }
+}
