@@ -1,32 +1,41 @@
 use arbitrary_int::{u1, u5};
 
+#[derive(Clone, Copy, Debug)]
 #[rustfmt::skip]
-enum Condition { Always, XZero, XDec, YZero, YDec, XNeqY, Pin, OsrNotEmpty, }
+pub enum Condition { Always, XZero, XDec, YZero, YDec, XNeqY, Pin, OsrNotEmpty }
 
 #[rustfmt::skip]
-mod wait {
+pub mod wait {
+    #[derive(Clone, Copy, Debug)]
     pub enum Source { Gpio, Pin, Irq, Reserved }
 }
 
 #[rustfmt::skip]
-mod shift {
+pub mod shift {
+    #[derive(Clone, Copy, Debug)]
     pub enum Source { Pins, X, Y, Null, Reserved1, Reserved2, Isr, Osr }
+    #[derive(Clone, Copy, Debug)]
     pub enum Destn { Pins, X, Y, Null, PinDirs, Pc, Isr, Exec }
 }
 
 #[rustfmt::skip]
-mod mov {
+pub mod mov {
+    #[derive(Clone, Copy, Debug)]
     pub enum Destn { Pins, X, Y, Reserved, Exec, Pc, Isr, Osr }
+    #[derive(Clone, Copy, Debug)]
     pub enum Op { None, Invert, BitReverse, Reserved }
+    #[derive(Clone, Copy, Debug)]
     pub enum Source { Pins, X, Y, Null, Reserved, Status, Isr, Osr }
 }
 
 #[rustfmt::skip]
-mod set {
+pub mod set {
+    #[derive(Clone, Copy, Debug)]
     pub enum Destn { Pins, X, Y, Reserved1, PinDirs, Reserved2, Reserved3, Reserved4 }
 }
 
-enum Instruction {
+#[derive(Clone, Copy, Debug)]
+pub enum Instruction {
     Jmp {
         condition: Condition,
         address: u5,
@@ -68,7 +77,10 @@ enum Instruction {
     },
 }
 
+#[derive(Clone, Copy, Debug)]
 pub struct Instr {
-    instruction: Instruction,
-    delay: u5,
+    pub instruction: Instruction,
+    pub delay: u5,
+    pub side_set: Option<u5>,
+    // TODO something about delay and side_set sharing bits
 }
