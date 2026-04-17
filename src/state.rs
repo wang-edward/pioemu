@@ -20,7 +20,7 @@ type PinRange = Range<0, 31>;
 
 const FIFO_DEPTH: usize = 4;
 #[derive(Debug)]
-struct Fifo {
+pub struct Fifo {
     data: VecDeque<u32>,
     depth: usize, // 4 normally, 8 if joined
 }
@@ -216,18 +216,18 @@ impl StateMachine {
 
 #[derive(Debug)]
 pub struct State {
-    pc: u5,
+    pub pc: u5,
     // no clock divider, don't think about timing rn
-    x: u32,
-    y: u32,
-    isr: u32,
-    osr: u32,
-    isr_shift_count: u8,
-    osr_shift_count: u8,
-    tx_fifo: Fifo,
-    rx_fifo: Fifo,
-    delay_counter: u8,
-    stalled: bool,
+    pub x: u32,
+    pub y: u32,
+    pub isr: u32,
+    pub osr: u32,
+    pub isr_shift_count: u8,
+    pub osr_shift_count: u8,
+    pub tx_fifo: Fifo,
+    pub rx_fifo: Fifo,
+    pub delay_counter: u8,
+    pub stalled: bool,
 }
 
 impl fmt::Display for State {

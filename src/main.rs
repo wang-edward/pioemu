@@ -1,6 +1,6 @@
-mod pio;
-mod state;
 use arbitrary_int::u5;
+use pioemu::pio;
+use pioemu::state;
 
 fn main() {
     println!("hi");
