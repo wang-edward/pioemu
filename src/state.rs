@@ -142,8 +142,14 @@ impl fmt::Display for StateMachine {
     }
 }
 
-fn to_mask(val: u8) -> u32 {
-    if val >= 32 { u32::MAX } else { (1u32 << val) - 1 }
+pub fn to_mask(val: u8) -> u32 {
+    assert!(val <= 32);
+    if val == 32 { u32::MAX } else { (1u32 << val) - 1 }
+}
+
+pub fn wrap_shiftr(x: u32, shift: u8) -> u32 {
+    let lift = (x & to_mask(shift)) << (32 - shift);
+    return (x >> shift) | lift;
 }
 
 impl StateMachine {
