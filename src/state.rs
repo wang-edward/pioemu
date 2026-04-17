@@ -212,10 +212,13 @@ impl StateMachine {
                 let (polarity, index) = (polarity.value() as u32, index.value() as u32);
                 let cond_met = match source {
                     wait::Source::Gpio => (gpio_in >> index) & 1,
-                    // wait::Source::Pin => (gpio_in >>
+                    wait::Source::Pin => (wrap_shiftr(gpio_in, self.config.in_base.get()) >> index) & 1,
+                    wait::Source::Irq => 1,
                     _ => panic!(),
-                };
-                // if cond met adavance_pc = false
+                } == polarity; // convert to bool / negate
+                if cond_met {
+                    // early return / advance_pc = false
+                }
             }
             _ => panic!(),
         }
