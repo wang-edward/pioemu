@@ -67,7 +67,7 @@ impl fmt::Display for Fifo {
 #[derive(Debug)]
 pub struct Block {
     pub instr_mem: [Option<Instr>; 32],
-    pub state_machines: [StateMachine; 4],
+    pub sms: [StateMachine; 4],
     pub gpio_out: u32,
     pub gpio_dir: u32,
     pub gpio_in: u32,
@@ -85,7 +85,7 @@ impl fmt::Display for Block {
         )?;
 
         // print state machines
-        for (i, sm) in self.state_machines.iter().enumerate() {
+        for (i, sm) in self.sms.iter().enumerate() {
             writeln!(f, "sm{}: {}", i, sm)?;
         }
         Ok(())
@@ -96,7 +96,7 @@ impl Block {
     pub fn new() -> Self {
         Self {
             instr_mem: std::array::from_fn(|_| None),
-            state_machines: std::array::from_fn(|_| StateMachine { state: State::new(), config: Config::new(), enabled: false }),
+            sms: std::array::from_fn(|_| StateMachine { state: State::new(), config: Config::new(), enabled: false }),
             gpio_out: 0,
             gpio_dir: 0,
             gpio_in: 0,
@@ -105,8 +105,8 @@ impl Block {
         }
     }
     pub fn step(&mut self) {
-        let Block { state_machines, instr_mem, gpio_out, gpio_dir, gpio_in, irq_flags, cycle } = self;
-        for (i, sm) in state_machines.iter_mut().enumerate() {
+        let Block { sms, instr_mem, gpio_out, gpio_dir, gpio_in, irq_flags, cycle } = self;
+        for (i, sm) in sms.iter_mut().enumerate() {
             if !sm.enabled {
                 continue;
             }

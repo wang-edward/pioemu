@@ -22,7 +22,7 @@ fn main() {
         side_set: None,
     });
 
-    for sm in &mut block.state_machines {
+    for sm in &mut block.sms {
         sm.enabled = true;
     }
 

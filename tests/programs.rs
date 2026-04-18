@@ -86,14 +86,14 @@ fn setup(program: &[instr::Instr], en: [bool; 4]) -> state::Block {
     for (i, instr) in program.iter().enumerate() {
         block.instr_mem[i] = Some(*instr);
     }
-    for (i, sm) in block.state_machines.iter_mut().enumerate() {
+    for (i, sm) in block.sms.iter_mut().enumerate() {
         sm.enabled = en[i];
     }
     block
 }
 
 fn sm0(block: &state::Block) -> &state::State {
-    &block.state_machines[0].state
+    &block.sms[0].state
 }
 
 #[test]
@@ -113,7 +113,7 @@ fn squarewave() {
     ];
     for _ in 0..8 {
         block.step();
-        let x: [u32; 4] = std::array::from_fn(|i| block.state_machines[i].state.x);
+        let x: [u32; 4] = std::array::from_fn(|i| block.sms[i].state.x);
         xs.push(x);
     }
     assert_eq!(xs, expected);
