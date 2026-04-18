@@ -443,4 +443,10 @@ impl Config {
             fjoin_tx: false,
         }
     }
+    fn calc_pull_thresh(&self) -> u8 {
+        if self.pull_thresh.get() == 0 { 32 } else { self.pull_thresh.get() }
+    }
+    fn calc_push_thresh(&self) -> u8 {
+        if self.push_thresh.get() == 0 { 32 } else { self.push_thresh.get() }
+    }
 }
