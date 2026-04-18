@@ -117,13 +117,16 @@ impl Block {
         }
         *cycle += 1;
     }
-    pub fn print_instr_mem(self) {
+    pub fn print_instr_mem(&self) {
         println!("program:");
         for (i, slot) in self.instr_mem.iter().enumerate() {
             if let Some(instr) = slot {
                 println!("  {:02}: {}", i, instr);
             }
         }
+    }
+    pub fn print(&self) {
+        println!("{}", self);
     }
 }
 
@@ -179,13 +182,13 @@ impl StateMachine {
                     Condition::XZero => self.state.x == 0,
                     Condition::XDec => {
                         let result = self.state.x != 0;
-                        self.state.x -= 1;
+                        self.state.x = self.state.x.wrapping_sub(1);
                         result
                     }
                     Condition::YZero => self.state.y == 0,
                     Condition::YDec => {
                         let result = self.state.y != 0;
-                        self.state.y -= 1;
+                        self.state.y = self.state.y.wrapping_sub(1);
                         result
                     }
                     Condition::XNeqY => self.state.x != self.state.y,
