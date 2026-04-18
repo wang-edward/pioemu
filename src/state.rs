@@ -178,13 +178,13 @@ impl StateMachine {
                     Condition::Always => true,
                     Condition::XZero => self.state.x == 0,
                     Condition::XDec => {
-                        let result = self.state.x == 0;
+                        let result = self.state.x != 0;
                         self.state.x -= 1;
                         result
                     }
                     Condition::YZero => self.state.y == 0,
                     Condition::YDec => {
-                        let result = self.state.y == 0;
+                        let result = self.state.y != 0;
                         self.state.y -= 1;
                         result
                     }
