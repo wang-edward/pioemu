@@ -1,4 +1,4 @@
-use crate::instr::{Condition, Instr, Instruction, set, wait};
+use crate::instr::{Condition, Instr, Instruction, set, shift, wait};
 use arbitrary_int::u5;
 use std::collections::VecDeque;
 use std::fmt;
@@ -200,27 +200,6 @@ impl StateMachine {
                     advance_pc = false;
                 }
             }
-            Instruction::Set { destn, data } => match destn {
-                set::Destn::Pins => {
-                    let (base, cnt) = (self.config.set_base.get() as u32, self.config.set_count.get());
-                    let data = data.value() as u32;
-                    let mask = if cnt == 32 { u32::MAX } else { to_mask(cnt) << base };
-                    *gpio_out = (*gpio_out & !mask) | ((data << base) & mask);
-                }
-                set::Destn::X => {
-                    self.state.x = data.value() as u32;
-                }
-                set::Destn::Y => {
-                    self.state.y = data.value() as u32;
-                }
-                set::Destn::PinDirs => {
-                    let (base, cnt) = (self.config.set_base.get() as u32, self.config.set_count.get());
-                    let data = data.value() as u32;
-                    let mask = if cnt == 32 { u32::MAX } else { to_mask(cnt) << base };
-                    *gpio_dir = (*gpio_dir & !mask) | ((data << base) & mask);
-                }
-                _ => panic!(),
-            },
             Instruction::Wait { polarity, source, index } => {
                 let (polarity, index) = (polarity.value() as u32, index.value() as u32);
                 let irq_index = calc_irq_index(index as u8, sm_id);
@@ -242,6 +221,46 @@ impl StateMachine {
                     return;
                 }
             }
+            Instruction::In { source, bit_count } => {
+                let bit_count = if bit_count.value() == 0 { 32 } else { bit_count.value() };
+                let data = match source {
+                    shift::Source::Pins => gpio_in >> self.config.in_base.get(),
+                    shift::Source::X => self.state.x,
+                    shift::Source::Y => self.state.y,
+                    shift::Source::Null => 0,
+                    shift::Source::Isr => self.state.isr,
+                    shift::Source::Osr => self.state.osr,
+                    _ => panic!(),
+                } & to_mask(bit_count);
+                match self.config.in_shiftdir {
+                    ShiftDir::Left => self.state.isr = (self.state.isr << bit_count) | data,
+                    ShiftDir::Right => self.state.isr = (self.state.isr >> bit_count) | wrap_shiftr(data, bit_count),
+                }
+                self.state.isr_shift_count = self.state.isr_shift_count.saturating_add(bit_count);
+                // TODO handle autopush: If automatic push is enabled, IN will also push the ISR contents to the RX FIFO if the push threshold is reached (SHIFTCTRL_PUSH_THRESH). IN still executes in one cycle, whether an automatic push takes place or not. The state machine will stall if the RX FIFO is full when an automatic push occurs. An automatic push clears the ISR contents to all-zeroes, and clears the input shift count. See Section 3.5.4 }
+            }
+
+            Instruction::Set { destn, data } => match destn {
+                set::Destn::Pins => {
+                    let (base, cnt) = (self.config.set_base.get() as u32, self.config.set_count.get());
+                    let data = data.value() as u32;
+                    let mask = if cnt == 32 { u32::MAX } else { to_mask(cnt) << base };
+                    *gpio_out = (*gpio_out & !mask) | ((data << base) & mask);
+                }
+                set::Destn::X => {
+                    self.state.x = data.value() as u32;
+                }
+                set::Destn::Y => {
+                    self.state.y = data.value() as u32;
+                }
+                set::Destn::PinDirs => {
+                    let (base, cnt) = (self.config.set_base.get() as u32, self.config.set_count.get());
+                    let data = data.value() as u32;
+                    let mask = if cnt == 32 { u32::MAX } else { to_mask(cnt) << base };
+                    *gpio_dir = (*gpio_dir & !mask) | ((data << base) & mask);
+                }
+                _ => panic!(),
+            },
             _ => panic!(),
         }
 
