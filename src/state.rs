@@ -71,6 +71,7 @@ pub struct Block {
     pub gpio_out: u32,
     pub gpio_dir: u32,
     pub gpio_in: u32,
+    irq_flags: u8,
     cycle: u64,
 }
 
@@ -99,19 +100,20 @@ impl Block {
             gpio_out: 0,
             gpio_dir: 0,
             gpio_in: 0,
+            irq_flags: 0,
             cycle: 0,
         }
     }
     pub fn step(&mut self) {
-        let Block { state_machines, instr_mem, gpio_out, gpio_dir, gpio_in, cycle } = self;
-        for sm in state_machines {
+        let Block { state_machines, instr_mem, gpio_out, gpio_dir, gpio_in, irq_flags, cycle } = self;
+        for (i, sm) in state_machines.iter_mut().enumerate() {
             if !sm.enabled {
                 continue;
             }
             let pc = sm.state.pc.value() as usize;
             let instr = instr_mem[pc].expect("no instruction at PC");
 
-            sm.execute(&instr, gpio_out, gpio_dir, *gpio_in);
+            sm.execute(&instr, gpio_out, gpio_dir, *gpio_in, irq_flags, i as u8);
         }
         *cycle += 1;
     }
@@ -152,8 +154,16 @@ pub fn wrap_shiftr(x: u32, shift: u8) -> u32 {
     return (x >> shift) | lift;
 }
 
+fn calc_irq_index(index: u8, sm_id: u8) -> u8 {
+    if index & 0x10 != 0 {
+        (index & 0x04) | ((index + sm_id) & 0x03)
+    } else {
+        index & 0x07
+    }
+}
+
 impl StateMachine {
-    fn execute(&mut self, instr: &Instr, gpio_out: &mut u32, gpio_dir: &mut u32, gpio_in: u32) {
+    fn execute(&mut self, instr: &Instr, gpio_out: &mut u32, gpio_dir: &mut u32, gpio_in: u32, irq_flags: &mut u8, sm_id: u8) {
         if self.state.delay_counter > 0 && !self.state.stalled {
             self.state.delay_counter -= 1;
             return;
@@ -210,14 +220,23 @@ impl StateMachine {
             },
             Instruction::Wait { polarity, source, index } => {
                 let (polarity, index) = (polarity.value() as u32, index.value() as u32);
+                let irq_index = calc_irq_index(index as u8, sm_id);
                 let cond_met = match source {
                     wait::Source::Gpio => (gpio_in >> index) & 1,
                     wait::Source::Pin => (wrap_shiftr(gpio_in, self.config.in_base.get()) >> index) & 1,
-                    wait::Source::Irq => 1,
+                    wait::Source::Irq => {
+                        assert!(index <= 7);
+                        (*irq_flags as u32 >> irq_index) & 1
+                    }
                     _ => panic!(),
                 } == polarity; // convert to bool / negate
                 if cond_met {
-                    // early return / advance_pc = false
+                    if matches!(source, wait::Source::Irq) && polarity == 1 {
+                        *irq_flags &= !(1 << irq_index); // If Polarity is 1, the selected IRQ flag is cleared by the state machine upon the wait condition being met.
+                    }
+                } else {
+                    self.state.stalled = true;
+                    return;
                 }
             }
             _ => panic!(),
