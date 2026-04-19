@@ -224,7 +224,7 @@ impl StateMachine {
             Instruction::In { source, bit_count } => {
                 let bit_count = if bit_count.value() == 0 { 32 } else { bit_count.value() };
                 let data = match source {
-                    shift::Source::Pins => gpio_in >> self.config.in_base.get(),
+                    shift::Source::Pins => wrap_shiftr(gpio_in, self.config.in_base.get()),
                     shift::Source::X => self.state.x,
                     shift::Source::Y => self.state.y,
                     shift::Source::Null => 0,
@@ -238,6 +238,15 @@ impl StateMachine {
                 }
                 self.state.isr_shift_count = self.state.isr_shift_count.saturating_add(bit_count);
                 // TODO handle autopush: If automatic push is enabled, IN will also push the ISR contents to the RX FIFO if the push threshold is reached (SHIFTCTRL_PUSH_THRESH). IN still executes in one cycle, whether an automatic push takes place or not. The state machine will stall if the RX FIFO is full when an automatic push occurs. An automatic push clears the ISR contents to all-zeroes, and clears the input shift count. See Section 3.5.4 }
+                if self.config.autopush && self.state.isr_shift_count >= self.config.calc_push_thresh() {
+                    if self.state.rx_fifo.is_full() {
+                        self.state.stalled = true;
+                        return;
+                    }
+                    self.state.rx_fifo.push(self.state.isr);
+                    self.state.isr = 0;
+                    self.state.isr_shift_count = 0;
+                }
             }
 
             Instruction::Set { destn, data } => match destn {
