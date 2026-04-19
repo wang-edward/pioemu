@@ -1,5 +1,6 @@
 use crate::instr::{Condition, Instr, Instruction, set, shift, wait};
 use arbitrary_int::u5;
+use std::cmp;
 use std::collections::VecDeque;
 use std::fmt;
 
@@ -248,6 +249,64 @@ impl StateMachine {
                     self.state.isr_shift_count = 0;
                 }
             }
+            Instruction::Out { destn, bit_count } => {
+                let bit_count = if bit_count.value() == 0 { 32 } else { bit_count.value() };
+                if self.config.autopull && self.state.osr_shift_count >= self.config.pull_thresh.get() {
+                    if self.state.tx_fifo.is_empty() {
+                        self.state.stalled = true;
+                        return;
+                    }
+                    // todo ? here?
+                    self.state.osr = self.state.tx_fifo.pop().expect("tx fifo empty when it shouldn't be");
+                    self.state.osr_shift_count = 0;
+                }
+
+                let data = match self.config.out_shiftdir {
+                    ShiftDir::Left => {
+                        let ans = (self.state.osr >> (32 - bit_count)) & to_mask(bit_count);
+                        self.state.osr = self.state.osr << bit_count;
+                        ans
+                    }
+                    ShiftDir::Right => {
+                        let ans = self.state.osr & to_mask(bit_count);
+                        self.state.osr = self.state.osr >> bit_count;
+                        ans
+                    }
+                };
+                match destn {
+                    shift::Destn::Pins => {
+                        let (out_count, out_base) = (self.config.out_count.get(), self.config.out_base.get());
+                        let mask = to_mask(out_count) << out_base;
+                        *gpio_out = (*gpio_out & !mask) | ((data << out_base) & mask);
+                    }
+                    shift::Destn::X => self.state.x = data,
+                    shift::Destn::Y => self.state.y = data,
+                    shift::Destn::Null => (),
+                    shift::Destn::PinDirs => {
+                        let (out_count, out_base) = (self.config.out_count.get(), self.config.out_base.get());
+                        let mask = to_mask(out_count) << out_base;
+                        *gpio_dir = (*gpio_dir & !mask) | ((data << out_base) & mask);
+                    }
+                    shift::Destn::Pc => {
+                        self.state.pc = u5::new(data as u8);
+                        advance_pc = false;
+                    }
+                    shift::Destn::Isr => {
+                        self.state.isr = data;
+                        self.state.isr_shift_count = bit_count;
+                    }
+                    shift::Destn::Exec => panic!(),
+                    // todo EXEC destn. i think we need to have bit decoding for this to work
+                }
+
+                self.state.osr_shift_count = cmp::min(32, self.state.osr_shift_count + bit_count);
+                if self.config.autopull && self.state.osr_shift_count >= self.config.calc_pull_thresh() {
+                    if !self.state.tx_fifo.is_empty() {
+                        self.state.osr = self.state.tx_fifo.pop().expect("tx fifo empty when it shouldn't be");
+                        self.state.osr_shift_count = 0;
+                    }
+                }
+            }
 
             Instruction::Set { destn, data } => match destn {
                 set::Destn::Pins => {
@@ -274,6 +333,12 @@ impl StateMachine {
         }
 
         self.state.delay_counter = instr.delay.value();
+        // TODO side set
+        // should be something like switch self.config.sideset_count == 5 vs 0
+        // also side_en controls whether to use MSB as enable
+        // If an instruction stalls, the side-set still takes effect immediately.
+        // - so maybe put this at the top
+        // and takes priority over OUT writing to the same pin
         if advance_pc {
             if self.state.pc == self.config.wrap_top {
                 self.state.pc = self.config.wrap_bottom;
