@@ -307,6 +307,46 @@ impl StateMachine {
                     }
                 }
             }
+            Instruction::Push { if_full, block } => {
+                let (if_full, block) = (if_full.value() == 1, block.value() == 1);
+                if if_full {
+                    if self.state.isr_shift_count >= self.config.calc_pull_thresh() {
+                        if self.state.rx_fifo.is_full() {
+                            if block {
+                                self.state.stalled = true;
+                                return; // todo check everything is good before return
+                            } else {
+                                self.state.isr = 0;
+                                self.state.isr_shift_count = 0; // XX ambiguous whether to clear shift count
+                                // RXSTALL set here? maybe not necessary to support cuz we can just
+                                // check if data is lost in the output array
+                            }
+                        } else {
+                            self.state.rx_fifo.push(self.state.isr);
+                            self.state.isr = 0;
+                            self.state.isr_shift_count = 0;
+                        }
+                    } else {
+                        // thresh not met, do nothing
+                    }
+                } else {
+                    if self.state.rx_fifo.is_full() {
+                        if block {
+                            self.state.stalled = true;
+                            return; // todo check everything is good before return
+                        } else {
+                            self.state.isr = 0;
+                            self.state.isr_shift_count = 0; // XX ambiguous whether to clear shift count
+                            // RXSTALL set here? maybe not necessary to support cuz we can just
+                            // check if data is lost in the output array
+                        }
+                    } else {
+                        self.state.rx_fifo.push(self.state.isr);
+                        self.state.isr = 0;
+                        self.state.isr_shift_count = 0;
+                    }
+                }
+            }
 
             Instruction::Set { destn, data } => match destn {
                 set::Destn::Pins => {
