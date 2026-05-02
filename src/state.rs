@@ -1,4 +1,4 @@
-use crate::instr::{Condition, Instr, Instruction, set, shift, wait};
+use crate::instr::{Condition, Instr, Instruction, mov, set, shift, wait};
 use arbitrary_int::u5;
 use std::cmp;
 use std::collections::VecDeque;
@@ -45,6 +45,9 @@ impl Fifo {
     }
     fn pop(&mut self) -> Option<u32> {
         self.data.pop_front()
+    }
+    fn len(&self) -> usize {
+        self.data.len()
     }
 }
 
@@ -158,6 +161,17 @@ pub fn wrap_shiftr(x: u32, shift: u8) -> u32 {
     return (x >> shift) | lift;
 }
 
+pub fn reverse(x: u32) -> u32 {
+    // TODO gotta be a builtin way
+    let mut x = x;
+    let mut ans: u32 = 0;
+    for _ in 0..32 {
+        ans = ans << 1 | (x & 0x1);
+        x = x >> 1;
+    }
+    ans
+}
+
 fn calc_irq_index(index: u8, sm_id: u8) -> u8 {
     if index & 0x10 != 0 {
         (index & 0x04) | ((index + sm_id) & 0x03)
@@ -167,6 +181,7 @@ fn calc_irq_index(index: u8, sm_id: u8) -> u8 {
 }
 
 impl StateMachine {
+    // TODO function for gpio in / out mapping
     fn execute(&mut self, instr: &Instr, gpio_out: &mut u32, gpio_dir: &mut u32, gpio_in: u32, irq_flags: &mut u8, sm_id: u8) {
         if self.state.delay_counter > 0 && !self.state.stalled {
             self.state.delay_counter -= 1;
@@ -295,8 +310,7 @@ impl StateMachine {
                         self.state.isr = data;
                         self.state.isr_shift_count = bit_count;
                     }
-                    shift::Destn::Exec => panic!(),
-                    // todo EXEC destn. i think we need to have bit decoding for this to work
+                    shift::Destn::Exec => panic!(), // todo EXEC destn. i think we need to have bit decoding for this to work
                 }
 
                 self.state.osr_shift_count = cmp::min(32, self.state.osr_shift_count + bit_count);
@@ -340,6 +354,54 @@ impl StateMachine {
                         self.state.osr = self.state.tx_fifo.pop().expect("tx fifo empty when it shouldn't be");
                     }
                     self.state.osr_shift_count = 0;
+                }
+            }
+            Instruction::Mov { destn, op, source } => {
+                let data = match source {
+                    mov::Source::Pins => wrap_shiftr(gpio_in, self.config.in_base.get()),
+                    mov::Source::X => self.state.x,
+                    mov::Source::Y => self.state.y,
+                    mov::Source::Null => 0,
+                    mov::Source::Status => {
+                        let level = match self.config.status_sel {
+                            StatusSel::TxLevel => self.state.tx_fifo.len(),
+                            StatusSel::RxLevel => self.state.rx_fifo.len(),
+                        };
+                        if level < self.config.status_n.get() as usize {
+                            0xffff_ffff
+                        } else {
+                            0x0
+                        }
+                    }
+                    mov::Source::Isr => self.state.isr,
+                    mov::Source::Osr => self.state.osr,
+                    _ => panic!(),
+                };
+                let data = match op {
+                    mov::Op::None => data,
+                    mov::Op::Invert => !data,
+                    mov::Op::BitReverse => reverse(data),
+                    _ => panic!(),
+                };
+                match destn {
+                    mov::Destn::Pins => {
+                        let (out_count, out_base) = (self.config.out_count.get(), self.config.out_base.get());
+                        let mask = to_mask(out_count) << out_base;
+                        *gpio_out = (*gpio_out & !mask) | ((data << out_base) & mask);
+                    }
+                    mov::Destn::X => self.state.x = data,
+                    mov::Destn::Y => self.state.y = data,
+                    mov::Destn::Exec => panic!(), // TODO exec
+                    mov::Destn::Pc => self.state.pc = u5::new(data as u8),
+                    mov::Destn::Isr => {
+                        self.state.isr = data;
+                        self.state.isr_shift_count = 0;
+                    }
+                    mov::Destn::Osr => {
+                        self.state.osr = data;
+                        self.state.osr_shift_count = 0;
+                    }
+                    _ => panic!(),
                 }
             }
 

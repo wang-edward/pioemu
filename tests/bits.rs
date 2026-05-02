@@ -1,4 +1,4 @@
-use pioemu::state::{to_mask, wrap_shiftr};
+use pioemu::state::{reverse, to_mask, wrap_shiftr};
 
 #[test]
 fn test_to_mask() {
@@ -12,4 +12,15 @@ fn test_to_mask() {
 fn test_wrap_shiftr() {
     assert_eq!(wrap_shiftr(0x0000_000f, 4), 0xf000_0000);
     assert_eq!(wrap_shiftr(0x0000_00ff, 4), 0xf000_000f);
+}
+
+#[test]
+fn test_reverse() {
+    assert_eq!(reverse(0x0000_010e), 0x7080_0000);
+}
+
+#[test]
+fn test_invert() {
+    // is ! logical not or bitwise?
+    assert_eq!(!0xffff_0000 as u32, 0x0000_ffff as u32);
 }
