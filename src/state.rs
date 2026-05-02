@@ -325,6 +325,7 @@ impl StateMachine {
             }
             Instruction::Pull { if_empty, block } => {
                 // TODO autopull noop and stuff
+                // TODO program checker (don't use mov dst, osr when autopull on and more)
                 let (if_empty, block) = (if_empty.value() == 1, block.value() == 1);
                 let should_pull = !if_empty | (self.state.osr_shift_count >= self.config.calc_pull_thresh());
                 if should_pull {
