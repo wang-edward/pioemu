@@ -323,6 +323,24 @@ impl StateMachine {
                     self.state.isr_shift_count = 0;
                 }
             }
+            Instruction::Pull { if_empty, block } => {
+                // TODO autopull noop and stuff
+                let (if_empty, block) = (if_empty.value() == 1, block.value() == 1);
+                let should_pull = !if_empty | (self.state.osr_shift_count >= self.config.calc_pull_thresh());
+                if should_pull {
+                    if self.state.tx_fifo.is_empty() {
+                        if block {
+                            self.state.stalled = true;
+                            return;
+                        } else {
+                            self.state.osr = self.state.x;
+                        }
+                    } else {
+                        self.state.osr = self.state.tx_fifo.pop().expect("tx fifo empty when it shouldn't be");
+                    }
+                    self.state.osr_shift_count = 0;
+                }
+            }
 
             Instruction::Set { destn, data } => match destn {
                 set::Destn::Pins => {
