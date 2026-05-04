@@ -172,7 +172,12 @@ pub fn reverse(x: u32) -> u32 {
     ans
 }
 
-fn calc_irq_index(index: u8, sm_id: u8) -> u8 {
+pub fn calc_irq_index(index: u8, sm_id: u8) -> u8 {
+    // not sure if i should return index & 0x3 here in every path
+    // since index is meant to represent [0, 7]
+    // so (index & 0x4) is tautologically 0
+    // and (index & 0x7) propogates errors? like in that case only the 3 LSB are valid anyway
+    // so it should be like: return (if MSB index else index + sm_id) & 0x3
     if index & 0x10 != 0 {
         (index & 0x04) | ((index + sm_id) & 0x03)
     } else {
@@ -402,6 +407,19 @@ impl StateMachine {
                         self.state.osr_shift_count = 0;
                     }
                     _ => panic!(),
+                }
+            }
+            Instruction::Irq { clear, wait, index } => {
+                let (clear, wait, index) = (clear.value() == 1, wait.value() == 1, index.value());
+                let irq_index = calc_irq_index(index as u8, sm_id);
+                if clear {
+                    *irq_flags = *irq_flags & !(1 << irq_index);
+                } else {
+                    if wait {
+                    } else {
+                        // set the flag
+                        *irq_flags = *irq_flags | !(1 << irq_index);
+                    }
                 }
             }
 

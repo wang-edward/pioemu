@@ -1,4 +1,4 @@
-use pioemu::state::{reverse, to_mask, wrap_shiftr};
+use pioemu::state::{calc_irq_index, reverse, to_mask, wrap_shiftr};
 
 #[test]
 fn test_to_mask() {
@@ -23,4 +23,10 @@ fn test_reverse() {
 fn test_invert() {
     // is ! logical not or bitwise?
     assert_eq!(!0xffff_0000 as u32, 0x0000_ffff as u32);
+}
+
+#[test]
+fn test_irq_index() {
+    assert_eq!(calc_irq_index(0x11, 2), 3);
+    assert_eq!(calc_irq_index(0x13, 2), 1);
 }

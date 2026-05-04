@@ -39,7 +39,7 @@ pub mod set {
 pub enum Instruction {
     Jmp {
         condition: Condition,
-        address: u5,
+        address: u5, // TODO use bool and range for instructions instead of u5
     },
     Wait {
         polarity: u1,
