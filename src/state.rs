@@ -172,12 +172,11 @@ pub fn reverse(x: u32) -> u32 {
     ans
 }
 
+pub fn bit_at(x: u8, index: u8) -> bool {
+    ((x >> index) & 0x1) == 1
+}
+
 pub fn calc_irq_index(index: u8, sm_id: u8) -> u8 {
-    // not sure if i should return index & 0x3 here in every path
-    // since index is meant to represent [0, 7]
-    // so (index & 0x4) is tautologically 0
-    // and (index & 0x7) propogates errors? like in that case only the 3 LSB are valid anyway
-    // so it should be like: return (if MSB index else index + sm_id) & 0x3
     if index & 0x10 != 0 {
         (index & 0x04) | ((index + sm_id) & 0x03)
     } else {
@@ -328,7 +327,7 @@ impl StateMachine {
             }
             Instruction::Push { if_full, block } => {
                 let (if_full, block) = (if_full.value() == 1, block.value() == 1);
-                let should_push = !if_full | (self.state.isr_shift_count >= self.config.calc_push_thresh());
+                let should_push = !if_full || (self.state.isr_shift_count >= self.config.calc_push_thresh());
                 if should_push {
                     if self.state.rx_fifo.is_full() {
                         if block {
@@ -412,17 +411,32 @@ impl StateMachine {
             Instruction::Irq { clear, wait, index } => {
                 let (clear, wait, index) = (clear.value() == 1, wait.value() == 1, index.value());
                 let irq_index = calc_irq_index(index as u8, sm_id);
-                if clear {
-                    *irq_flags = *irq_flags & !(1 << irq_index);
+
+                // irq_stalled implies this instr is being run for the 2nd time
+                // so it's "polling" whether the flag has been cleared by an external source
+                // - and not doing the normal instr behaviour
+                if self.state.irq_stalled {
+                    if bit_at(*irq_flags, irq_index) {
+                        self.state.stalled = true;
+                        return;
+                    } else {
+                        self.state.irq_stalled = false;
+                    }
+                // normal set / clear behaviour
                 } else {
-                    if wait {
+                    if clear {
+                        *irq_flags &= !(1 << irq_index);
                     } else {
                         // set the flag
-                        *irq_flags = *irq_flags | !(1 << irq_index);
+                        *irq_flags |= 1 << irq_index;
+                        if wait {
+                            self.state.irq_stalled = true;
+                            self.state.stalled = true;
+                            return;
+                        }
                     }
                 }
             }
-
             Instruction::Set { destn, data } => match destn {
                 set::Destn::Pins => {
                     let (base, cnt) = (self.config.set_base.get() as u32, self.config.set_count.get());
@@ -478,6 +492,7 @@ pub struct State {
     pub rx_fifo: Fifo,
     pub delay_counter: u8,
     pub stalled: bool,
+    irq_stalled: bool,
 }
 
 impl fmt::Display for State {
@@ -511,6 +526,7 @@ impl State {
             rx_fifo: Fifo::new(FIFO_DEPTH),
             delay_counter: 0,
             stalled: false,
+            irq_stalled: false,
         }
     }
 }

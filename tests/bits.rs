@@ -1,4 +1,4 @@
-use pioemu::state::{calc_irq_index, reverse, to_mask, wrap_shiftr};
+use pioemu::state::{bit_at, calc_irq_index, reverse, to_mask, wrap_shiftr};
 
 #[test]
 fn test_to_mask() {
@@ -29,4 +29,11 @@ fn test_invert() {
 fn test_irq_index() {
     assert_eq!(calc_irq_index(0x11, 2), 3);
     assert_eq!(calc_irq_index(0x13, 2), 1);
+}
+
+#[test]
+fn test_bit_at() {
+    assert_eq!(bit_at(0x11, 2), false);
+    assert_eq!(bit_at(0x11, 0), true);
+    assert_eq!(bit_at(0x11, 4), true);
 }
