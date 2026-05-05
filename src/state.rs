@@ -184,6 +184,16 @@ pub fn calc_irq_index(index: u8, sm_id: u8) -> u8 {
     }
 }
 
+pub fn sat_shl(x: u32, n: u8) -> u32 {
+    assert!(n <= 32);
+    ((x as u64) << n) as u32
+}
+
+pub fn sat_shr(x: u32, n: u8) -> u32 {
+    assert!(n <= 32);
+    ((x as u64) >> n) as u32
+}
+
 impl StateMachine {
     // TODO function for gpio in / out mapping
     fn execute(&mut self, instr: &Instr, gpio_out: &mut u32, gpio_dir: &mut u32, gpio_in: u32, irq_flags: &mut u8, sm_id: u8) {
@@ -213,7 +223,7 @@ impl StateMachine {
                     }
                     Condition::XNeqY => self.state.x != self.state.y,
                     Condition::Pin => (gpio_in >> self.config.jmp_pin.value()) & 1 == 1,
-                    Condition::OsrNotEmpty => self.state.osr_shift_count < self.config.pull_thresh.get(), // TODO
+                    Condition::OsrNotEmpty => self.state.osr_shift_count < self.config.calc_pull_thresh(), // TODO
                 };
                 if jump {
                     self.state.pc = address;
@@ -253,10 +263,10 @@ impl StateMachine {
                     _ => panic!(),
                 } & to_mask(bit_count);
                 match self.config.in_shiftdir {
-                    ShiftDir::Left => self.state.isr = (self.state.isr << bit_count) | data,
-                    ShiftDir::Right => self.state.isr = (self.state.isr >> bit_count) | wrap_shiftr(data, bit_count),
+                    ShiftDir::Left => self.state.isr = sat_shl(self.state.isr, bit_count) | data,
+                    ShiftDir::Right => self.state.isr = sat_shr(self.state.isr, bit_count) | wrap_shiftr(data, bit_count),
                 }
-                self.state.isr_shift_count = self.state.isr_shift_count.saturating_add(bit_count);
+                self.state.isr_shift_count = cmp::min(63, self.state.isr_shift_count + bit_count);
                 // TODO handle autopush: If automatic push is enabled, IN will also push the ISR contents to the RX FIFO if the push threshold is reached (SHIFTCTRL_PUSH_THRESH). IN still executes in one cycle, whether an automatic push takes place or not. The state machine will stall if the RX FIFO is full when an automatic push occurs. An automatic push clears the ISR contents to all-zeroes, and clears the input shift count. See Section 3.5.4 }
                 if self.config.autopush && self.state.isr_shift_count >= self.config.calc_push_thresh() {
                     if self.state.rx_fifo.is_full() {
@@ -282,13 +292,13 @@ impl StateMachine {
 
                 let data = match self.config.out_shiftdir {
                     ShiftDir::Left => {
-                        let ans = (self.state.osr >> (32 - bit_count)) & to_mask(bit_count);
-                        self.state.osr = self.state.osr << bit_count;
+                        let ans = sat_shr(self.state.osr, 32 - bit_count) & to_mask(bit_count);
+                        self.state.osr = sat_shl(self.state.osr, bit_count);
                         ans
                     }
                     ShiftDir::Right => {
                         let ans = self.state.osr & to_mask(bit_count);
-                        self.state.osr = self.state.osr >> bit_count;
+                        self.state.osr = sat_shr(self.state.osr, bit_count);
                         ans
                     }
                 };
@@ -317,7 +327,7 @@ impl StateMachine {
                     shift::Destn::Exec => panic!(), // todo EXEC destn. i think we need to have bit decoding for this to work
                 }
 
-                self.state.osr_shift_count = cmp::min(32, self.state.osr_shift_count + bit_count);
+                self.state.osr_shift_count = cmp::min(63, self.state.osr_shift_count + bit_count);
                 if self.config.autopull && self.state.osr_shift_count >= self.config.calc_pull_thresh() {
                     if !self.state.tx_fifo.is_empty() {
                         self.state.osr = self.state.tx_fifo.pop().expect("tx fifo empty when it shouldn't be");

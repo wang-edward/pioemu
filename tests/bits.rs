@@ -1,4 +1,4 @@
-use pioemu::state::{bit_at, calc_irq_index, reverse, to_mask, wrap_shiftr};
+use pioemu::state::{bit_at, calc_irq_index, reverse, sat_shl, sat_shr, to_mask, wrap_shiftr};
 
 #[test]
 fn test_to_mask() {
@@ -36,4 +36,10 @@ fn test_bit_at() {
     assert_eq!(bit_at(0x11, 2), false);
     assert_eq!(bit_at(0x11, 0), true);
     assert_eq!(bit_at(0x11, 4), true);
+}
+
+#[test]
+fn test_overflow() {
+    assert_eq!(sat_shl(0xf000_0000, 1), 0xe000_0000);
+    assert_eq!(sat_shr(0x0000_000f, 1), 0x0000_0007);
 }
