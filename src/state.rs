@@ -280,7 +280,7 @@ impl StateMachine {
             }
             Instruction::Out { destn, bit_count } => {
                 let bit_count = if bit_count.value() == 0 { 32 } else { bit_count.value() };
-                if self.config.autopull && self.state.osr_shift_count >= self.config.pull_thresh.get() {
+                if self.config.autopull && self.state.osr_shift_count >= self.config.calc_pull_thresh() {
                     if self.state.tx_fifo.is_empty() {
                         self.state.stalled = true;
                         return;
