@@ -474,7 +474,7 @@ impl StateMachine {
             if matches!(instr.instruction, Instruction::Mov { .. } | Instruction::Pull { .. }) {
                 self.state.osr_shift_count = 0;
             }
-            if self.state.osr_shift_count >= self.config.calc_pull_thresh() {
+            if self.config.autopull && self.state.osr_shift_count >= self.config.calc_pull_thresh() {
                 if !self.state.tx_fifo.is_empty() {
                     self.state.osr = self.state.tx_fifo.pop().expect("tx fifo empty when it shouldn't be");
                     self.state.osr_shift_count = 0;
