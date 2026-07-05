@@ -461,8 +461,7 @@ pub fn to_mask(val: u8) -> u32 {
 }
 
 pub fn wrap_shiftr(x: u32, shift: u8) -> u32 {
-    let lift = (x & to_mask(shift)) << (32 - shift);
-    return (x >> shift) | lift;
+    x.rotate_right(shift as u32)
 }
 
 pub fn reverse(x: u32) -> u32 {
@@ -795,12 +794,8 @@ impl StateMachine {
             },
         }
 
-        // autopull
         if !matches!(instr.instruction, Instruction::Out { .. }) {
-            if matches!(instr.instruction, Instruction::Mov { .. } | Instruction::Pull { .. }) {
-                self.state.osr_shift_count = 0;
-            }
-            if self.state.osr_shift_count >= self.config.calc_pull_thresh() {
+            if self.config.autopull && self.state.osr_shift_count >= self.config.calc_pull_thresh() {
                 if !self.state.tx_fifo.is_empty() {
                     self.state.osr = self.state.tx_fifo.pop().expect("tx fifo empty when it shouldn't be");
                     self.state.osr_shift_count = 0;
