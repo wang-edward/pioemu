@@ -5,3 +5,4 @@ edition = "2024"
 
 [dependencies]
 arbitrary-int = "1"
+pio = "0.3"

@@ -1,8 +1,15 @@
 use crate::instr::{Condition, Instr, Instruction, mov, set, shift, wait};
-use arbitrary_int::u5;
+use arbitrary_int::{u1, u5};
 use std::cmp;
 use std::collections::VecDeque;
 use std::fmt;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StepEvent {
+    pub rx_pushed: Option<u32>,
+    pub tx_popped: Option<u32>,
+    pub irq_changed: Option<u8>,
+}
 
 #[derive(Clone, Copy, Debug)]
 struct Range<const MIN: u8, const MAX: u8>(u8);
@@ -48,6 +55,12 @@ impl Fifo {
     }
     fn len(&self) -> usize {
         self.data.len()
+    }
+    pub fn peek_front(&self) -> Option<u32> {
+        self.data.front().copied()
+    }
+    pub fn peek_back(&self) -> Option<u32> {
+        self.data.back().copied()
     }
 }
 
@@ -108,8 +121,10 @@ impl Block {
             cycle: 0,
         }
     }
-    pub fn step(&mut self) {
+    pub fn step(&mut self) -> StepEvent {
         let Block { sms, instr_mem, gpio_out, gpio_dir, gpio_in, irq_flags, cycle } = self;
+        // only for SM0
+        let mut event = StepEvent { rx_pushed: None, tx_popped: None, irq_changed: None };
         for (i, sm) in sms.iter_mut().enumerate() {
             if !sm.enabled {
                 continue;
@@ -117,9 +132,19 @@ impl Block {
             let pc = sm.state.pc.value() as usize;
             let instr = instr_mem[pc].expect("no instruction at PC");
 
-            sm.execute(&instr, gpio_out, gpio_dir, *gpio_in, irq_flags, i as u8);
+            let ev = sm.execute(&instr, gpio_out, gpio_dir, *gpio_in, irq_flags, i as u8);
+            if ev.rx_pushed.is_some() {
+                event.rx_pushed = ev.rx_pushed;
+            }
+            if ev.tx_popped.is_some() {
+                event.tx_popped = ev.tx_popped;
+            }
+            if ev.irq_changed.is_some() {
+                event.irq_changed = ev.irq_changed;
+            }
         }
         *cycle += 1;
+        event
     }
     pub fn print_instr_mem(&self) {
         println!("program:");
@@ -131,6 +156,285 @@ impl Block {
     }
     pub fn print(&self) {
         println!("{}", self);
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct Sm0Setup {
+    pub instructions: Vec<u16>, // assembled PIO words, <= 32
+    pub origin: u8,
+    pub wrap_top: u8,
+    pub wrap_bottom: u8,
+    pub in_base: u8,
+    pub out_base: u8,
+    pub out_count: u8,
+    pub set_base: u8,
+    pub set_count: u8,
+    pub jmp_pin: u8,
+    pub pull_thresh: u8,
+    pub push_thresh: u8,
+    pub out_shiftdir_right: bool,
+    pub in_shiftdir_right: bool,
+    pub autopull: bool,
+    pub autopush: bool,
+    pub fjoin_tx: bool,
+    pub fjoin_rx: bool,
+    pub x_init: u32,
+    pub y_init: u32,
+    pub tx_seed: Vec<u32>,
+}
+
+/// Decode an assembled PIO word into the emulator's own `Instr`. Decoding uses
+/// the `pio` crate's decoder and translates it to emulator's Instr
+pub fn decode_to_instr(word: u16) -> Option<Instr> {
+    use pio::{
+        InSource as PIn, Instruction as PInstr, InstructionOperands as PO, JmpCondition as PJ, MovDestination as PMD, MovOperation as PMO,
+        MovSource as PMS, OutDestination as POut, SetDestination as PSet, SideSet, WaitSource as PW,
+    };
+
+    // no side-set
+    let decoded = PInstr::decode(word, SideSet::new(false, 0, false))?;
+    // 0x00 = 32
+    let bc = |bit_count: u8| u5::new(bit_count & 0x1f);
+
+    let instruction = match decoded.operands {
+        PO::JMP { condition, address } => Instruction::Jmp {
+            condition: match condition {
+                PJ::Always => Condition::Always,
+                PJ::XIsZero => Condition::XZero,
+                PJ::XDecNonZero => Condition::XDec,
+                PJ::YIsZero => Condition::YZero,
+                PJ::YDecNonZero => Condition::YDec,
+                PJ::XNotEqualY => Condition::XNeqY,
+                PJ::PinHigh => Condition::Pin,
+                PJ::OutputShiftRegisterNotEmpty => Condition::OsrNotEmpty,
+            },
+            address: u5::new(address & 0x1f),
+        },
+        PO::WAIT { polarity, source, index, .. } => Instruction::Wait {
+            polarity: u1::new(polarity & 1),
+            source: match source {
+                PW::GPIO => wait::Source::Gpio,
+                PW::PIN => wait::Source::Pin,
+                PW::IRQ => wait::Source::Irq,
+                PW::JMPPIN => wait::Source::Reserved,
+            },
+            index: u5::new(index & 0x1f),
+        },
+        PO::IN { source, bit_count } => Instruction::In {
+            source: match source {
+                PIn::PINS => shift::Source::Pins,
+                PIn::X => shift::Source::X,
+                PIn::Y => shift::Source::Y,
+                PIn::NULL => shift::Source::Null,
+                PIn::ISR => shift::Source::Isr,
+                PIn::OSR => shift::Source::Osr,
+            },
+            bit_count: bc(bit_count),
+        },
+        PO::OUT { destination, bit_count } => Instruction::Out {
+            destn: match destination {
+                POut::PINS => shift::Destn::Pins,
+                POut::X => shift::Destn::X,
+                POut::Y => shift::Destn::Y,
+                POut::NULL => shift::Destn::Null,
+                POut::PINDIRS => shift::Destn::PinDirs,
+                POut::PC => shift::Destn::Pc,
+                POut::ISR => shift::Destn::Isr,
+                POut::EXEC => shift::Destn::Exec,
+            },
+            bit_count: bc(bit_count),
+        },
+        PO::PUSH { if_full, block } => Instruction::Push { if_full: u1::new(if_full as u8), block: u1::new(block as u8) },
+        PO::PULL { if_empty, block } => Instruction::Pull { if_empty: u1::new(if_empty as u8), block: u1::new(block as u8) },
+        PO::MOV { destination, op, source } => Instruction::Mov {
+            destn: match destination {
+                PMD::PINS => mov::Destn::Pins,
+                PMD::X => mov::Destn::X,
+                PMD::Y => mov::Destn::Y,
+                PMD::PINDIRS => mov::Destn::Reserved, // emulator models no MOV→PINDIRS
+                PMD::EXEC => mov::Destn::Exec,
+                PMD::PC => mov::Destn::Pc,
+                PMD::ISR => mov::Destn::Isr,
+                PMD::OSR => mov::Destn::Osr,
+            },
+            op: match op {
+                PMO::None => mov::Op::None,
+                PMO::Invert => mov::Op::Invert,
+                PMO::BitReverse => mov::Op::BitReverse,
+            },
+            source: match source {
+                PMS::PINS => mov::Source::Pins,
+                PMS::X => mov::Source::X,
+                PMS::Y => mov::Source::Y,
+                PMS::NULL => mov::Source::Null,
+                PMS::STATUS => mov::Source::Status,
+                PMS::ISR => mov::Source::Isr,
+                PMS::OSR => mov::Source::Osr,
+            },
+        },
+        PO::IRQ { clear, wait, index, .. } => {
+            Instruction::Irq { clear: u1::new(clear as u8), wait: u1::new(wait as u8), index: u5::new(index & 0x1f) }
+        }
+        PO::SET { destination, data } => Instruction::Set {
+            destn: match destination {
+                PSet::PINS => set::Destn::Pins,
+                PSet::X => set::Destn::X,
+                PSet::Y => set::Destn::Y,
+                PSet::PINDIRS => set::Destn::PinDirs,
+            },
+            data: u5::new(data & 0x1f),
+        },
+        _ => return None,
+    };
+
+    Some(Instr { instruction, delay: u5::new(decoded.delay & 0x1f), side_set: None })
+}
+
+impl Block {
+    pub fn irq_flags(&self) -> u8 {
+        self.irq_flags
+    }
+
+    /// SM0's FLEVEL packing: TX0 in bits[3:0], RX0 in bits[7:4] (RP2040 layout;
+    /// the other SMs are idle in v1 so their nibbles read 0).
+    ///
+    /// seems fine to me (???)
+    pub fn fifo_levels_sm0(&self) -> u32 {
+        let tx0 = self.sms[0].state.tx_fifo.len() as u32;
+        let rx0 = self.sms[0].state.rx_fifo.len() as u32;
+        (tx0 & 0xf) | ((rx0 & 0xf) << 4)
+    }
+
+    /// Configure SM0 from a `Sm0Setup`
+    pub fn configure_sm0(&mut self, prog: &Sm0Setup) {
+        // Full reset 
+        self.instr_mem = std::array::from_fn(|_| None);
+        self.gpio_out = 0;
+        self.gpio_dir = 0;
+        self.gpio_in = 0;
+        self.irq_flags = 0;
+        self.cycle = 0;
+        for sm in &mut self.sms {
+            sm.enabled = false;
+            sm.state = State::new();
+            sm.config = Config::new();
+        }
+
+        // Yeah idk about this part tbh
+
+        // Decode + load the program at [origin, origin+len), as the firmware
+        // loads instruction memory. Undecodable / unmodelled words stay `None`;
+        // the run loop stops if the PC reaches one.
+        for (i, &word) in prog.instructions.iter().enumerate() {
+            let addr = prog.origin as usize + i;
+            if addr < 32 {
+                self.instr_mem[addr] = decode_to_instr(word);
+            }
+        }
+
+        let sm = &mut self.sms[0];
+        sm.enabled = true;
+        sm.state.pc = u5::new(prog.origin & 0x1f);
+
+        let cfg = &mut sm.config;
+        cfg.out_base = PinRange::new(prog.out_base & 0x1f);
+        cfg.out_count = Range::new(prog.out_count.min(32));
+        cfg.set_base = PinRange::new(prog.set_base & 0x1f);
+        cfg.set_count = Range::new(prog.set_count.min(5));
+        cfg.in_base = PinRange::new(prog.in_base & 0x1f);
+        cfg.sideset_base = PinRange::new(0);
+        cfg.sideset_count = Range::new(0);
+        cfg.sideset_en = false;
+        cfg.side_pindir = false;
+        cfg.jmp_pin = u5::new(prog.jmp_pin & 0x1f);
+        cfg.wrap_top = u5::new(prog.wrap_top & 0x1f);
+        cfg.wrap_bottom = u5::new(prog.wrap_bottom & 0x1f);
+        // Threshold of 32 is encoded as the 5-bit value 0 (calc_*_thresh maps
+        // it back), matching the firmware's `& 0x1f`.
+        cfg.pull_thresh = Range::new(prog.pull_thresh & 0x1f);
+        cfg.push_thresh = Range::new(prog.push_thresh & 0x1f);
+        cfg.out_shiftdir = if prog.out_shiftdir_right { ShiftDir::Right } else { ShiftDir::Left };
+        cfg.in_shiftdir = if prog.in_shiftdir_right { ShiftDir::Right } else { ShiftDir::Left };
+        cfg.autopull = prog.autopull;
+        cfg.autopush = prog.autopush;
+        cfg.fjoin_tx = prog.fjoin_tx;
+        cfg.fjoin_rx = prog.fjoin_rx;
+
+        // FIFO depths follow the join setting: a join steals the other FIFO's
+        // four entries (RP2040 §3.5.4). v1 generation keeps both joins off.
+        let (tx_depth, rx_depth) = match (prog.fjoin_tx, prog.fjoin_rx) {
+            (true, false) => (FIFO_DEPTH * 2, 0),
+            (false, true) => (0, FIFO_DEPTH * 2),
+            _ => (FIFO_DEPTH, FIFO_DEPTH),
+        };
+        sm.state.tx_fifo = Fifo::new(tx_depth);
+        sm.state.rx_fifo = Fifo::new(rx_depth);
+
+        // Preload X/Y and seed TX, exactly as the firmware does — and only when
+        // a TX FIFO exists (an RX join leaves X/Y at their reset value 0 and
+        // nothing to seed). After the firmware's PULL+OUT preload the OSR is
+        // empty (osr_shift_count = 32), which is `State::new`'s default.
+        if !prog.fjoin_rx {
+            sm.state.x = prog.x_init;
+            sm.state.y = prog.y_init;
+            for &word in prog.tx_seed.iter() {
+                sm.state.tx_fifo.push(word);
+            }
+        }
+    }
+
+    /// Force one instruction into SM0 without PC/instr-mem bookkeeping 
+    fn force_sm0(&mut self, instruction: Instruction) {
+        let instr = Instr { instruction, delay: u5::new(0), side_set: None };
+        let Block { sms, gpio_out, gpio_dir, gpio_in, irq_flags, .. } = self;
+        let _ = sms[0].execute(&instr, gpio_out, gpio_dir, *gpio_in, irq_flags, 0);
+    }
+
+    // I don't know about these parts
+
+    /// Drain SM0's RX FIFO (the program's own pushed words), capped at 8 like
+    /// the firmware's `drain_rx`. Must run *before* [`Block::readout_suffix_sm0`].
+    pub fn drain_rx0(&mut self) -> Vec<u32> {
+        let mut v = Vec::new();
+        while v.len() < 8 {
+            match self.sms[0].state.rx_fifo.pop() {
+                Some(w) => v.push(w),
+                None => break,
+            }
+        }
+        v
+    }
+
+    /// The identical readout suffix to `firmware::runner::readout_suffix`: with
+    /// autopush/autopull disabled, expose the hidden registers through the RX
+    /// FIFO via forced instructions and compare the *drained words* (never the
+    /// internal x/y fields). Yields `[ISR, X, Y, OSR]`.
+    pub fn readout_suffix_sm0(&mut self) -> Vec<u32> {
+        self.sms[0].config.autopush = false;
+        self.sms[0].config.autopull = false;
+
+        let push = Instruction::Push { if_full: u1::new(0), block: u1::new(0) };
+        let mut v = Vec::new();
+        let pop_into = |this: &mut Block, v: &mut Vec<u32>| {
+            if let Some(w) = this.sms[0].state.rx_fifo.pop() {
+                v.push(w);
+            }
+        };
+
+        self.force_sm0(push); // FIFO <- ISR
+        pop_into(self, &mut v);
+        self.force_sm0(Instruction::In { source: shift::Source::X, bit_count: u5::new(0) }); // ISR <- X
+        self.force_sm0(push); // FIFO <- X
+        pop_into(self, &mut v);
+        self.force_sm0(Instruction::In { source: shift::Source::Y, bit_count: u5::new(0) }); // ISR <- Y
+        self.force_sm0(push); // FIFO <- Y
+        pop_into(self, &mut v);
+        self.force_sm0(Instruction::Mov { destn: mov::Destn::Isr, op: mov::Op::None, source: mov::Source::Osr }); // ISR <- OSR (copy, does not drain OSR)
+        self.force_sm0(push); // FIFO <- OSR
+        pop_into(self, &mut v);
+
+        v
     }
 }
 
@@ -195,8 +499,29 @@ pub fn sat_shr(x: u32, n: u8) -> u32 {
 }
 
 impl StateMachine {
+    // Capture-before / diff-after wrapper around the instruction body. Snapshot
+    // the FIFO/IRQ-shaped state up front, run the (unchanged) execute body, then
+    // diff to recover what landed this cycle. This catches every push/pop/irq
+    // site — PUSH, PULL, autopush in IN, autopull in OUT, the trailing autopull
+    // after non-OUT instructions, MOV/wait-on-IRQ clearing — without threading
+    // event fields through each one, and it works regardless of which early
+    // return the body took.
+    fn execute(&mut self, instr: &Instr, gpio_out: &mut u32, gpio_dir: &mut u32, gpio_in: u32, irq_flags: &mut u8, sm_id: u8) -> StepEvent {
+        let irq_before = *irq_flags;
+        let rx_before_len = self.state.rx_fifo.len();
+        let tx_before_len = self.state.tx_fifo.len();
+        let tx_front_before = self.state.tx_fifo.peek_front();
+
+        self.execute_inner(instr, gpio_out, gpio_dir, gpio_in, irq_flags, sm_id);
+
+        let irq_changed = (*irq_flags != irq_before).then_some(*irq_flags);
+        let rx_pushed = (self.state.rx_fifo.len() > rx_before_len).then(|| self.state.rx_fifo.peek_back().expect("just pushed"));
+        let tx_popped = (self.state.tx_fifo.len() < tx_before_len).then(|| tx_front_before.expect("tx shrank, so it had a front"));
+        StepEvent { rx_pushed, tx_popped, irq_changed }
+    }
+
     // TODO function for gpio in / out mapping
-    fn execute(&mut self, instr: &Instr, gpio_out: &mut u32, gpio_dir: &mut u32, gpio_in: u32, irq_flags: &mut u8, sm_id: u8) {
+    fn execute_inner(&mut self, instr: &Instr, gpio_out: &mut u32, gpio_dir: &mut u32, gpio_in: u32, irq_flags: &mut u8, sm_id: u8) {
         if self.state.delay_counter > 0 && !self.state.stalled {
             self.state.delay_counter -= 1;
             return;
