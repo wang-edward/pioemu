@@ -12,6 +12,9 @@ fn test_to_mask() {
 fn test_wrap_shiftr() {
     assert_eq!(wrap_shiftr(0x0000_000f, 4), 0xf000_0000);
     assert_eq!(wrap_shiftr(0x0000_00ff, 4), 0xf000_000f);
+
+    assert_eq!(wrap_shiftr(0x1234_5678, 32), 0x1234_5678);
+    assert_eq!(wrap_shiftr(0x1234_5678, 0), 0x1234_5678);
 }
 
 #[test]

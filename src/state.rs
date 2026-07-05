@@ -157,8 +157,7 @@ pub fn to_mask(val: u8) -> u32 {
 }
 
 pub fn wrap_shiftr(x: u32, shift: u8) -> u32 {
-    let lift = (x & to_mask(shift)) << (32 - shift);
-    return (x >> shift) | lift;
+    x.rotate_right(shift as u32)
 }
 
 pub fn reverse(x: u32) -> u32 {
