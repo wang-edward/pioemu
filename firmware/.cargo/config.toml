@@ -1,7 +1,5 @@
 [target.thumbv8m.main-none-eabihf]
-# Choose a default "cargo run" tool (see README for more info)
-# - `probe-rs` provides flashing and defmt via a hardware debugger, and stack unwind on panic
-# - `picotool` loads an elf, skipping unchanged flash sectors, verify it, and execute it
+# `picotool` flashes and starts the firmware through USB.
 runner = "picotool load -u -v -x -t elf"
 
 # Pass some extra options to rustc, some of which get passed on to the linker.
@@ -20,7 +18,3 @@ rustflags = [
 
 [build]
 target = "thumbv8m.main-none-eabihf"
-
-# GP2 → SWCLK
-# GP3 → SWDIO
-# GND → GND
