@@ -30,6 +30,7 @@ struct SmConfig {
 }
 
 struct Snapshot {
+    ticks_elapsed: u32,
     test_pc: u32,
     marker_pc: u32,
     stalled: bool,
@@ -38,6 +39,12 @@ struct Snapshot {
     irq: u8,
     flevel: u32,
     fdebug: u32,
+    rx_count: usize,
+    rx: [u32; 4],
+    x: u32,
+    y: u32,
+    isr: u32,
+    osr: u32,
 }
 
 /// Tell the RP2350 Boot ROM about this application.
@@ -105,10 +112,10 @@ fn main() -> ! {
     let test_program = pio.install(&test_program).unwrap();
     let marker_program = pio.install(&marker_program).unwrap();
 
-    let (mut test_sm, _test_rx, _test_tx) = PIOBuilder::from_installed_program(test_program)
+    let (_test_sm, _test_rx, _test_tx) = PIOBuilder::from_installed_program(test_program)
         .clock_divisor_fixed_point(CLOCK_DIVIDER, 0)
         .build(sm0);
-    let (mut marker_sm, _marker_rx, _marker_tx) = PIOBuilder::from_installed_program(marker_program)
+    let (_marker_sm, _marker_rx, _marker_tx) = PIOBuilder::from_installed_program(marker_program)
         .clock_divisor_fixed_point(CLOCK_DIVIDER, 0)
         .build(sm1);
 
@@ -137,82 +144,75 @@ fn main() -> ! {
         );
 
         for ticks_elapsed in 1..=TICKS_PER_RUN {
-            reset_and_initialize(
+            let snapshot = run_and_snapshot(
                 &peripherals.RESETS,
                 registers,
                 test_code.as_slice(),
                 marker_code.as_slice(),
                 configs,
-            );
-
-            for _ in 0..ticks_elapsed {
-                let previous_marker_pc = marker_sm.instruction_address();
-
-                // The grouped start and stop each compile to one atomic PIO CTRL write.
-                // Interrupts remain disabled only while the slow PIO clock is running.
-                (test_sm, marker_sm) = cortex_m::interrupt::free(|_| {
-                    let running = test_sm.with(marker_sm).start();
-                    let (test_running, marker_running) = running.free();
-
-                    while marker_running.instruction_address() == previous_marker_pc {
-                        spin_loop();
-                    }
-
-                    test_running.with(marker_running).stop().free()
-                });
-            }
-
-            // Save non-destructive state before the diagnostic instructions alter SM0.
-            let snapshot = Snapshot {
-                test_pc: test_sm.instruction_address(),
-                marker_pc: marker_sm.instruction_address(),
-                stalled: test_sm.stalled(),
-                padout: registers.dbg_padout().read().bits(),
-                padoe: registers.dbg_padoe().read().bits(),
-                irq: pio.get_irq_raw(),
-                flevel: registers.flevel().read().bits(),
-                fdebug: registers.fdebug().read().bits(),
-            };
-
-            let mut rx_words = [0u32; 4];
-            let mut rx_count = 0usize;
-            while registers.fstat().read().rxempty().bits() & 1 == 0 {
-                let word = registers.rxf(0).read().bits();
-                if rx_count < rx_words.len() {
-                    rx_words[rx_count] = word;
-                }
-                rx_count += 1;
-            }
-
-            let hidden = extract_hidden_registers(registers).unwrap_or([u32::MAX; 4]);
-
-            let mut line = String::<320>::new();
-            writeln!(
-                line,
-                "{},{},{},{},{:08x},{:08x},{:02x},{:08x},{:08x},{},{:08x},{:08x},{:08x},{:08x},{:08x},{:08x},{:08x},{:08x}\r",
                 ticks_elapsed,
-                snapshot.test_pc,
-                snapshot.marker_pc,
-                snapshot.stalled as u8,
-                snapshot.padout,
-                snapshot.padoe,
-                snapshot.irq,
-                snapshot.flevel,
-                snapshot.fdebug,
-                rx_count,
-                rx_words[0],
-                rx_words[1],
-                rx_words[2],
-                rx_words[3],
-                hidden[1],
-                hidden[2],
-                hidden[0],
-                hidden[3],
-            )
-            .unwrap();
-            send(&mut usb, &mut serial, line.as_bytes());
+            );
+            send_snapshot(&mut usb, &mut serial, &snapshot);
         }
     }
+}
+
+fn run_and_snapshot(
+    resets: &pac::RESETS,
+    registers: &pac::pio0::RegisterBlock,
+    test_code: &[u16],
+    marker_code: &[u16],
+    configs: [SmConfig; 2],
+    ticks_elapsed: u32,
+) -> Snapshot {
+    reset_and_initialize(resets, registers, test_code, marker_code, configs);
+
+    for _ in 0..ticks_elapsed {
+        step_one_tick(registers);
+    }
+
+    // Capture everything readable before draining RX or injecting diagnostics.
+    let mut snapshot = Snapshot {
+        ticks_elapsed,
+        test_pc: registers.sm(0).sm_addr().read().bits(),
+        marker_pc: registers.sm(1).sm_addr().read().bits(),
+        stalled: registers.sm(0).sm_execctrl().read().exec_stalled().bit(),
+        padout: registers.dbg_padout().read().bits(),
+        padoe: registers.dbg_padoe().read().bits(),
+        irq: registers.irq().read().irq().bits(),
+        flevel: registers.flevel().read().bits(),
+        fdebug: registers.fdebug().read().bits(),
+        rx_count: 0,
+        rx: [0; 4],
+        x: u32::MAX,
+        y: u32::MAX,
+        isr: u32::MAX,
+        osr: u32::MAX,
+    };
+
+    while registers.fstat().read().rxempty().bits() & 1 == 0 {
+        let word = registers.rxf(0).read().bits();
+        if snapshot.rx_count < snapshot.rx.len() {
+            snapshot.rx[snapshot.rx_count] = word;
+        }
+        snapshot.rx_count += 1;
+    }
+
+    extract_hidden_registers(registers, &mut snapshot);
+    snapshot
+}
+
+fn step_one_tick(registers: &pac::pio0::RegisterBlock) {
+    cortex_m::interrupt::free(|_| {
+        let previous_marker_pc = registers.sm(1).sm_addr().read().bits();
+
+        // Enable and disable both SMs with one CTRL write at each boundary.
+        registers.ctrl().write(|w| unsafe { w.bits(0b11) });
+        while registers.sm(1).sm_addr().read().bits() == previous_marker_pc {
+            spin_loop();
+        }
+        registers.ctrl().write(|w| unsafe { w.bits(0) });
+    });
 }
 
 fn sm_config(registers: &pac::pio0::RegisterBlock, index: usize) -> SmConfig {
@@ -269,21 +269,32 @@ fn reset_and_initialize(
     registers.ctrl().write(|w| unsafe { w.bits(0b11 << 8) });
 }
 
-fn extract_hidden_registers(registers: &pac::pio0::RegisterBlock) -> Option<[u32; 4]> {
+fn extract_hidden_registers(registers: &pac::pio0::RegisterBlock, snapshot: &mut Snapshot) {
     registers
         .sm(0)
         .sm_shiftctrl()
         .modify(|_, w| w.autopush().clear_bit().autopull().clear_bit());
 
-    let isr = push_and_read(registers)?;
+    let Some(isr) = push_and_read(registers) else {
+        return;
+    };
     inject(registers, mov_to_isr(MovSource::X));
-    let x = push_and_read(registers)?;
+    let Some(x) = push_and_read(registers) else {
+        return;
+    };
     inject(registers, mov_to_isr(MovSource::Y));
-    let y = push_and_read(registers)?;
+    let Some(y) = push_and_read(registers) else {
+        return;
+    };
     inject(registers, mov_to_isr(MovSource::OSR));
-    let osr = push_and_read(registers)?;
+    let Some(osr) = push_and_read(registers) else {
+        return;
+    };
 
-    Some([isr, x, y, osr])
+    snapshot.isr = isr;
+    snapshot.x = x;
+    snapshot.y = y;
+    snapshot.osr = osr;
 }
 
 fn push_and_read(registers: &pac::pio0::RegisterBlock) -> Option<u32> {
@@ -308,6 +319,34 @@ fn jmp(address: u8) -> u16 {
 
 fn mov_to_isr(source: MovSource) -> u16 {
     InstructionOperands::MOV { destination: MovDestination::ISR, op: MovOperation::None, source }.encode()
+}
+
+fn send_snapshot(usb: &mut UsbDevice<'_, hal::usb::UsbBus>, serial: &mut SerialPort<'_, hal::usb::UsbBus>, snapshot: &Snapshot) {
+    let mut line = String::<320>::new();
+    writeln!(
+        line,
+        "{},{},{},{},{:08x},{:08x},{:02x},{:08x},{:08x},{},{:08x},{:08x},{:08x},{:08x},{:08x},{:08x},{:08x},{:08x}\r",
+        snapshot.ticks_elapsed,
+        snapshot.test_pc,
+        snapshot.marker_pc,
+        snapshot.stalled as u8,
+        snapshot.padout,
+        snapshot.padoe,
+        snapshot.irq,
+        snapshot.flevel,
+        snapshot.fdebug,
+        snapshot.rx_count,
+        snapshot.rx[0],
+        snapshot.rx[1],
+        snapshot.rx[2],
+        snapshot.rx[3],
+        snapshot.x,
+        snapshot.y,
+        snapshot.isr,
+        snapshot.osr,
+    )
+    .unwrap();
+    send(usb, serial, line.as_bytes());
 }
 
 fn send(usb: &mut UsbDevice<'_, hal::usb::UsbBus>, serial: &mut SerialPort<'_, hal::usb::UsbBus>, mut bytes: &[u8]) {
