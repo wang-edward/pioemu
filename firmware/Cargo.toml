@@ -9,8 +9,7 @@ cortex-m = "0.7"
 cortex-m-rt = "0.7"
 heapless = "0.8"
 panic-halt = "0.2"
-pio = "0.2"
-pio-proc = "0.2"
+pioemu-protocol = { path = "../protocol" }
 usb-device = "0.3"
 usbd-serial = "0.2"
 

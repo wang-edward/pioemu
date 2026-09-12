@@ -1,0 +1,10 @@
+[package]
+name = "pioemu-app"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+pio = "0.2"
+pio-proc = "0.2"
+pioemu-protocol = { path = "../protocol" }
+serialport = { version = "4", default-features = false }

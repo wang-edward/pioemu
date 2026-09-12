@@ -4,11 +4,10 @@
 use core::fmt::Write;
 use core::hint::spin_loop;
 
-use hal::pio::{PIOBuilder, PIOExt};
 use hal::{entry, pac};
 use heapless::String;
 use panic_halt as _;
-use pio::{InstructionOperands, JmpCondition, MovDestination, MovOperation, MovSource};
+use pioemu_protocol::{CSV_HEADER, Decoder, Request};
 use rp235x_hal as hal;
 use rp235x_hal::clocks::init_clocks_and_plls;
 use usb_device::LangID;
@@ -17,8 +16,6 @@ use usb_device::device::{StringDescriptors, UsbDevice, UsbDeviceBuilder, UsbVidP
 use usbd_serial::{SerialPort, USB_CLASS_CDC};
 
 const CLOCK_DIVIDER: u16 = 60_000;
-const TICKS_PER_RUN: u32 = 16;
-const TEST_ORIGIN: usize = 0;
 const MARKER_ORIGIN: usize = 30;
 
 #[derive(Clone, Copy)]
@@ -81,39 +78,8 @@ fn main() -> ! {
         .unwrap()
         .build();
 
-    let (mut pio, sm0, sm1, _, _) = peripherals.PIO0.split(&mut peripherals.RESETS);
-
-    // SM0 eventually stalls on PULL. Its JMP also has delay cycles, so its PC is
-    // deliberately not a usable indication that a PIO clock tick occurred.
-    let test_program = pio_proc::pio_asm!(
-        ".origin 0",
-        ".wrap_target",
-        "set x, 3",
-        "count:",
-        "jmp x-- count [2]",
-        "pull block",
-        ".wrap",
-    )
-    .program;
-    let test_code = test_program.code.clone();
-
-    // These two shared instruction-memory slots are the clock marker. SM1's PC
-    // changes on every clock tick, independently of SM0's delay or stall state.
-    let marker_program = pio_proc::pio_asm!(".origin 30", ".wrap_target", "nop", "nop", ".wrap",).program;
-    let marker_code = marker_program.code.clone();
-
-    let test_program = pio.install(&test_program).unwrap();
-    let marker_program = pio.install(&marker_program).unwrap();
-
-    let (mut test_sm, _test_rx, _test_tx) = PIOBuilder::from_installed_program(test_program)
-        .clock_divisor_fixed_point(CLOCK_DIVIDER, 0)
-        .build(sm0);
-    let (mut marker_sm, _marker_rx, _marker_tx) = PIOBuilder::from_installed_program(marker_program)
-        .clock_divisor_fixed_point(CLOCK_DIVIDER, 0)
-        .build(sm1);
-
     let registers = unsafe { &*pac::PIO0::ptr() };
-    let configs = [sm_config(registers, 0), sm_config(registers, 1)];
+    let mut decoder = Decoder::default();
 
     let mut receive_buffer = [0u8; 64];
 
@@ -126,129 +92,132 @@ fn main() -> ! {
             continue;
         };
 
-        if !receive_buffer[..count].contains(&b'r') {
-            continue;
-        }
-
-        send(
-            &mut usb,
-            &mut serial,
-            b"ticks_elapsed,test_pc,marker_pc,stalled,padout,padoe,irq,flevel,fdebug,rx_count,rx0,rx1,rx2,rx3,x,y,isr,osr\r\n",
-        );
-
-        for ticks_elapsed in 1..=TICKS_PER_RUN {
-            reset_and_initialize(
-                &peripherals.RESETS,
-                registers,
-                test_code.as_slice(),
-                marker_code.as_slice(),
-                configs,
-            );
-
-            for _ in 0..ticks_elapsed {
-                let previous_marker_pc = marker_sm.instruction_address();
-
-                // The grouped start and stop each compile to one atomic PIO CTRL write.
-                // Interrupts remain disabled only while the slow PIO clock is running.
-                (test_sm, marker_sm) = cortex_m::interrupt::free(|_| {
-                    let running = test_sm.with(marker_sm).start();
-                    let (test_running, marker_running) = running.free();
-
-                    while marker_running.instruction_address() == previous_marker_pc {
-                        spin_loop();
-                    }
-
-                    test_running.with(marker_running).stop().free()
-                });
-            }
-
-            // Save non-destructive state before the diagnostic instructions alter SM0.
-            let snapshot = Snapshot {
-                test_pc: test_sm.instruction_address(),
-                marker_pc: marker_sm.instruction_address(),
-                stalled: test_sm.stalled(),
-                padout: registers.dbg_padout().read().bits(),
-                padoe: registers.dbg_padoe().read().bits(),
-                irq: pio.get_irq_raw(),
-                flevel: registers.flevel().read().bits(),
-                fdebug: registers.fdebug().read().bits(),
+        for byte in &receive_buffer[..count] {
+            let Some(request) = decoder.push(*byte) else {
+                continue;
             };
-
-            let mut rx_words = [0u32; 4];
-            let mut rx_count = 0usize;
-            while registers.fstat().read().rxempty().bits() & 1 == 0 {
-                let word = registers.rxf(0).read().bits();
-                if rx_count < rx_words.len() {
-                    rx_words[rx_count] = word;
+            let request = match request {
+                Ok(request) => request,
+                Err(error) => {
+                    send(&mut usb, &mut serial, b"ERR ");
+                    send(&mut usb, &mut serial, error.as_bytes());
+                    send(&mut usb, &mut serial, b"\r\n");
+                    continue;
                 }
-                rx_count += 1;
+            };
+            send(&mut usb, &mut serial, CSV_HEADER.as_bytes());
+            send(&mut usb, &mut serial, b"\r\n");
+
+            for ticks_elapsed in 1..=request.ticks {
+                reset_and_initialize(&peripherals.RESETS, registers, &request);
+
+                for _ in 0..ticks_elapsed {
+                    let previous_marker_pc = registers.sm(1).sm_addr().read().bits();
+                    cortex_m::interrupt::free(|_| {
+                        // Enable/disable both SMs in the same write. The divider is
+                        // deliberately slow enough to stop before the next tick.
+                        registers.ctrl().write(|w| unsafe { w.bits(0b11) });
+                        while registers.sm(1).sm_addr().read().bits() == previous_marker_pc {
+                            spin_loop();
+                        }
+                        registers.ctrl().write(|w| unsafe { w.bits(0) });
+                    });
+                    // Replays can be long; keep USB serviced between ticks.
+                    usb.poll(&mut [&mut serial]);
+                }
+
+                // Save non-destructive state before the diagnostic instructions alter SM0.
+                let snapshot = Snapshot {
+                    test_pc: registers.sm(0).sm_addr().read().bits(),
+                    marker_pc: registers.sm(1).sm_addr().read().bits(),
+                    stalled: registers.sm(0).sm_execctrl().read().exec_stalled().bit_is_set(),
+                    padout: registers.dbg_padout().read().bits(),
+                    padoe: registers.dbg_padoe().read().bits(),
+                    irq: registers.irq().read().bits() as u8,
+                    flevel: registers.flevel().read().bits(),
+                    fdebug: registers.fdebug().read().bits(),
+                };
+
+                let mut rx_words = [0u32; 4];
+                let mut rx_count = 0usize;
+                while registers.fstat().read().rxempty().bits() & 1 == 0 {
+                    let word = registers.rxf(0).read().bits();
+                    if rx_count < rx_words.len() {
+                        rx_words[rx_count] = word;
+                    }
+                    rx_count += 1;
+                }
+
+                let Some(hidden) = extract_hidden_registers(registers) else {
+                    send(&mut usb, &mut serial, b"ERR register extraction failed\r\n");
+                    break;
+                };
+
+                let mut line = String::<320>::new();
+                writeln!(
+                    line,
+                    "{},{},{},{},{:08x},{:08x},{:02x},{:08x},{:08x},{},{:08x},{:08x},{:08x},{:08x},{:08x},{:08x},{:08x},{:08x}\r",
+                    ticks_elapsed,
+                    snapshot.test_pc,
+                    snapshot.marker_pc,
+                    snapshot.stalled as u8,
+                    snapshot.padout,
+                    snapshot.padoe,
+                    snapshot.irq,
+                    snapshot.flevel,
+                    snapshot.fdebug,
+                    rx_count,
+                    rx_words[0],
+                    rx_words[1],
+                    rx_words[2],
+                    rx_words[3],
+                    hidden[1],
+                    hidden[2],
+                    hidden[0],
+                    hidden[3],
+                )
+                .unwrap();
+                send(&mut usb, &mut serial, line.as_bytes());
+                if ticks_elapsed == request.ticks {
+                    send(&mut usb, &mut serial, b"DONE\r\n");
+                }
             }
-
-            let hidden = extract_hidden_registers(registers).unwrap_or([u32::MAX; 4]);
-
-            let mut line = String::<320>::new();
-            writeln!(
-                line,
-                "{},{},{},{},{:08x},{:08x},{:02x},{:08x},{:08x},{},{:08x},{:08x},{:08x},{:08x},{:08x},{:08x},{:08x},{:08x}\r",
-                ticks_elapsed,
-                snapshot.test_pc,
-                snapshot.marker_pc,
-                snapshot.stalled as u8,
-                snapshot.padout,
-                snapshot.padoe,
-                snapshot.irq,
-                snapshot.flevel,
-                snapshot.fdebug,
-                rx_count,
-                rx_words[0],
-                rx_words[1],
-                rx_words[2],
-                rx_words[3],
-                hidden[1],
-                hidden[2],
-                hidden[0],
-                hidden[3],
-            )
-            .unwrap();
-            send(&mut usb, &mut serial, line.as_bytes());
         }
     }
 }
 
-fn sm_config(registers: &pac::pio0::RegisterBlock, index: usize) -> SmConfig {
-    let sm = registers.sm(index);
-    SmConfig {
-        clkdiv: sm.sm_clkdiv().read().bits(),
-        execctrl: sm.sm_execctrl().read().bits(),
-        shiftctrl: sm.sm_shiftctrl().read().bits(),
-        pinctrl: sm.sm_pinctrl().read().bits(),
-    }
-}
-
-fn reset_and_initialize(
-    resets: &pac::RESETS,
-    registers: &pac::pio0::RegisterBlock,
-    test_code: &[u16],
-    marker_code: &[u16],
-    configs: [SmConfig; 2],
-) {
+fn reset_and_initialize(resets: &pac::RESETS, registers: &pac::pio0::RegisterBlock, request: &Request) {
     resets.reset().modify(|_, w| w.pio0().set_bit());
     resets.reset().modify(|_, w| w.pio0().clear_bit());
     while resets.reset_done().read().pio0().bit_is_clear() {
         spin_loop();
     }
 
-    for (offset, instruction) in test_code.iter().enumerate() {
+    for (offset, instruction) in request.code[..request.len].iter().enumerate() {
         registers
-            .instr_mem(TEST_ORIGIN + offset)
+            .instr_mem(request.origin as usize + offset)
             .write(|w| unsafe { w.bits(*instruction as u32) });
     }
-    for (offset, instruction) in marker_code.iter().enumerate() {
+    // Fixed machine code: NOP (MOV Y, Y), one instruction per marker tick.
+    for (offset, instruction) in [0xa042u16; 2].iter().enumerate() {
         registers
             .instr_mem(MARKER_ORIGIN + offset)
             .write(|w| unsafe { w.bits(*instruction as u32) });
     }
 
+    let configs = [
+        SmConfig {
+            clkdiv: (CLOCK_DIVIDER as u32) << 16,
+            execctrl: ((request.wrap_target as u32) << 7)
+                | ((request.wrap_source as u32) << 12)
+                | ((request.side_optional as u32) << 30)
+                | ((request.side_pindirs as u32) << 29),
+            // Match PIOBuilder defaults: shift right, no automatic push/pull.
+            shiftctrl: (1 << 18) | (1 << 19),
+            pinctrl: (5 << 26) | ((request.side_bits as u32) << 29),
+        },
+        SmConfig { clkdiv: (CLOCK_DIVIDER as u32) << 16, execctrl: (30 << 7) | (31 << 12), shiftctrl: (1 << 18) | (1 << 19), pinctrl: 0 },
+    ];
     for (index, config) in configs.iter().enumerate() {
         let sm = registers.sm(index);
         sm.sm_clkdiv().write(|w| unsafe { w.bits(config.clkdiv) });
@@ -259,7 +228,7 @@ fn reset_and_initialize(
 
     // Clear pending instructions, stalls, delays and shift counters in both SMs.
     registers.ctrl().write(|w| unsafe { w.bits(0b11 << 4) });
-    inject(registers, jmp(TEST_ORIGIN as u8));
+    inject(registers, jmp(request.origin));
     registers
         .sm(1)
         .sm_instr()
@@ -275,19 +244,21 @@ fn extract_hidden_registers(registers: &pac::pio0::RegisterBlock) -> Option<[u32
         .sm_shiftctrl()
         .modify(|_, w| w.autopush().clear_bit().autopull().clear_bit());
 
+    // Diagnostic instructions must not apply mandatory side-set to pins.
+    registers.sm(0).sm_pinctrl().modify(|_, w| unsafe { w.sideset_count().bits(0) });
     let isr = push_and_read(registers)?;
-    inject(registers, mov_to_isr(MovSource::X));
+    inject(registers, 0xa0c1); // MOV ISR, X
     let x = push_and_read(registers)?;
-    inject(registers, mov_to_isr(MovSource::Y));
+    inject(registers, 0xa0c2); // MOV ISR, Y
     let y = push_and_read(registers)?;
-    inject(registers, mov_to_isr(MovSource::OSR));
+    inject(registers, 0xa0c7); // MOV ISR, OSR
     let osr = push_and_read(registers)?;
 
     Some([isr, x, y, osr])
 }
 
 fn push_and_read(registers: &pac::pio0::RegisterBlock) -> Option<u32> {
-    inject(registers, InstructionOperands::PUSH { if_full: false, block: false }.encode());
+    inject(registers, 0x8000); // PUSH NOBLOCK
 
     for _ in 0..4096 {
         if registers.fstat().read().rxempty().bits() & 1 == 0 {
@@ -303,11 +274,7 @@ fn inject(registers: &pac::pio0::RegisterBlock, instruction: u16) {
 }
 
 fn jmp(address: u8) -> u16 {
-    InstructionOperands::JMP { condition: JmpCondition::Always, address }.encode()
-}
-
-fn mov_to_isr(source: MovSource) -> u16 {
-    InstructionOperands::MOV { destination: MovDestination::ISR, op: MovOperation::None, source }.encode()
+    address as u16
 }
 
 fn send(usb: &mut UsbDevice<'_, hal::usb::UsbBus>, serial: &mut SerialPort<'_, hal::usb::UsbBus>, mut bytes: &[u8]) {
