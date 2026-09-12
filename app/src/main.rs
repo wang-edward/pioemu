@@ -26,6 +26,8 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let ports: Vec<_> = serialport::available_ports()?
         .into_iter()
+        // macOS lists both /dev/cu.* and /dev/tty.* for each device. Use the callout port so one Pico is counted only once.
+        .filter(|port| !cfg!(target_os = "macos") || port.port_name.starts_with("/dev/cu."))
         .filter(|port| {
             matches!(&port.port_type, SerialPortType::UsbPort(info)
             if info.vid == 0x1209 && info.pid == 0x2350)
