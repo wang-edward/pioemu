@@ -11,13 +11,13 @@ The emulator is tested as follows:
 3. Run the same program on `pioemu`
 4. Compare the results
 
-### Q: How do we sample the PIO?
+## Q: How do we sample the PIO?
 It isn't obvious to know when to sample the PIO. The PC does not always change on a tick. For example, the SM (state machine) could be stalled.
 This program uses a second state machine in lockstep with the first that just loops over two `nop` instructions.
 This changes the PC of the 2nd SM on every tick, acting like a clock.
 We then use this to know when to sample the first SM (that is actually running the program).
 
-### How do we read internal registers `(x, y, isr, osr)`?
+## How do we read internal registers `(x, y, isr, osr)`?
 We can't read these registers directly from the CPU.
 Instead, we have to extract them by pushing them into the RX fifo and popping it with the CPU.[^1]
 But we can't do this on intermediate ticks, since it changes program execution.
@@ -31,7 +31,7 @@ Here's a workaround. If we want to run a program for N ticks, we'll instead run 
 This takes longer but makes the testing much more rigorous.
 We compare internal registers and FIFO contents after every tick which cataches differences that wouldn’t show up if we're only looking at the PC or GPIO outputs.
 
-#### Specifics on reading internal registers
+## Specifics on reading internal registers
 - ISR: (push its value into the RX FIFO, then have the CPU read it. This clears ISR, so capture it first.)
 - X: (Copy X into ISR, push ISR into the RX FIFO, then read it from the CPU.)
 - Y: (Copy Y into ISR, push ISR into the RX FIFO, then read it from the CPU.)
