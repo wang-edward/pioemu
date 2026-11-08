@@ -6,7 +6,7 @@ I tested the emulator against real hardware.
 
 ## Testing
 The emulator is tested as follows:
-1. Generate a random PIO program in `app`
+1. Generate a random PIO program in `difftest`
 2. Send it over USB to `firmware`, run it on the real PIO and send back the results
 3. Run the same program on `pioemu`
 4. Compare the results

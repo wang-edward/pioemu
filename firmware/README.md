@@ -19,12 +19,12 @@ The firmware enumerates as a USB CDC serial device named `PIO tick prototype`.
 After flashing, run the PC example from the repository root:
 
 ```sh
-cargo run -p pioemu-app
+cargo run -p difftest
 ```
 
-Edit the inline PIO program and `TICKS` in `app/src/main.rs`. Cargo assembles the
+Edit the inline PIO program and `TICKS` in `difftest/src/main.rs`. Cargo assembles the
 program on the PC; the firmware receives instruction words and configuration,
-then returns one CSV snapshot after each tick. The app discovers the USB device
+then returns one CSV snapshot after each tick. difftest discovers the USB device
 by VID/PID and prints the trace. Connect only one pioemu device at a time.
 
 SM0 runs the uploaded program. SM1 runs two fixed NOPs in slots 30 and 31 as a
@@ -51,7 +51,7 @@ RUN1 ticks origin wrap_target wrap_source side_bits side_flags word_count hex_wo
 
 Metadata is decimal; instruction words are hexadecimal. Side flags use bit 0 for
 optional side-set and bit 1 for pin directions; `side_bits` includes the optional
-enable bit. Addresses are absolute; the app relocates JMPs and wrap addresses.
+enable bit. Addresses are absolute; difftest relocates JMPs and wrap addresses.
 The firmware accepts requests split across USB packets. It responds with the CSV
 header, the requested rows, and `DONE`, or an `ERR message` line. Wait for completion
 before sending another request. The old single-character `r` command is replaced.
