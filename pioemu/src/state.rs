@@ -46,8 +46,11 @@ impl Fifo {
     fn pop(&mut self) -> Option<u32> {
         self.data.pop_front()
     }
-    fn len(&self) -> usize {
+    pub fn len(&self) -> usize {
         self.data.len()
+    }
+    pub fn iter(&self) -> impl Iterator<Item = &u32> {
+        self.data.iter()
     }
 }
 
@@ -75,7 +78,7 @@ pub struct Block {
     pub gpio_out: u32,
     pub gpio_dir: u32,
     pub gpio_in: u32,
-    irq_flags: u8,
+    pub irq_flags: u8,
     cycle: u64,
 }
 
@@ -664,6 +667,16 @@ impl Config {
             fjoin_rx: false,
             fjoin_tx: false,
         }
+    }
+    pub fn set_wrap(&mut self, bottom: u5, top: u5) {
+        self.wrap_bottom = bottom;
+        self.wrap_top = top;
+    }
+    /// `count` includes the optional enable bit, like SMx_PINCTRL.SIDESET_COUNT.
+    pub fn set_sideset(&mut self, count: u8, optional: bool, pindirs: bool) {
+        self.sideset_count = Range::new(count);
+        self.sideset_en = optional;
+        self.side_pindir = pindirs;
     }
     fn calc_pull_thresh(&self) -> u8 {
         if self.pull_thresh.get() == 0 { 32 } else { self.pull_thresh.get() }

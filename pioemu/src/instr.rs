@@ -86,6 +86,84 @@ pub struct Instr {
     // TODO something about delay and side_set sharing bits
 }
 
+impl Instr {
+    /// Decodes a machine-code word. `side_bits` includes the optional enable bit, like SMx_PINCTRL.SIDESET_COUNT.
+    pub fn decode(word: u16, side_bits: u8, side_optional: bool) -> Self {
+        assert!(side_bits <= 5 && !(side_optional && side_bits == 0), "invalid side-set config");
+        let (a, b) = (((word >> 5) & 7) as usize, (word & 31) as u8);
+        let bit = |i: usize| u1::new(((a >> i) & 1) as u8);
+        let instruction = match word >> 13 {
+            0 => {
+                use Condition::*;
+                Instruction::Jmp { condition: [Always, XZero, XDec, YZero, YDec, XNeqY, Pin, OsrNotEmpty][a], address: u5::new(b) }
+            }
+            1 => {
+                use wait::Source::*;
+                Instruction::Wait { polarity: bit(2), source: [Gpio, Pin, Irq, Reserved][a & 3], index: u5::new(b) }
+            }
+            2 => {
+                use shift::Source::*;
+                Instruction::In { source: [Pins, X, Y, Null, Reserved1, Reserved2, Isr, Osr][a], bit_count: u5::new(b) }
+            }
+            3 => {
+                use shift::Destn::*;
+                Instruction::Out { destn: [Pins, X, Y, Null, PinDirs, Pc, Isr, Exec][a], bit_count: u5::new(b) }
+            }
+            4 => {
+                assert!(b == 0, "unsupported PUSH/PULL encoding {word:04x}");
+                if a & 4 == 0 {
+                    Instruction::Push { if_full: bit(1), block: bit(0) }
+                } else {
+                    Instruction::Pull { if_empty: bit(1), block: bit(0) }
+                }
+            }
+            5 => {
+                use mov::{Destn, Op, Source};
+                Instruction::Mov {
+                    destn: [
+                        Destn::Pins,
+                        Destn::X,
+                        Destn::Y,
+                        Destn::Reserved,
+                        Destn::Exec,
+                        Destn::Pc,
+                        Destn::Isr,
+                        Destn::Osr,
+                    ][a],
+                    op: [Op::None, Op::Invert, Op::BitReverse, Op::Reserved][(b >> 3) as usize],
+                    source: [
+                        Source::Pins,
+                        Source::X,
+                        Source::Y,
+                        Source::Null,
+                        Source::Reserved,
+                        Source::Status,
+                        Source::Isr,
+                        Source::Osr,
+                    ][(b & 7) as usize],
+                }
+            }
+            6 => Instruction::Irq { clear: bit(1), wait: bit(0), index: u5::new(b) },
+            _ => {
+                use set::Destn::*;
+                Instruction::Set { destn: [Pins, X, Y, Reserved1, PinDirs, Reserved2, Reserved3, Reserved4][a], data: u5::new(b) }
+            }
+        };
+
+        // Side-set takes the top `side_bits` of the delay field; with `opt`, its MSB enables it.
+        let field = ((word >> 8) & 31) as u8;
+        let delay_bits = 5 - side_bits;
+        let side = field >> delay_bits;
+        let side_set = match (side_bits, side_optional) {
+            (0, _) => None,
+            (_, true) if side >> (side_bits - 1) == 0 => None,
+            (_, true) => Some(side & !(1 << (side_bits - 1))),
+            _ => Some(side),
+        };
+        Self { instruction, delay: u5::new(field & ((1 << delay_bits) - 1)), side_set: side_set.map(u5::new) }
+    }
+}
+
 impl fmt::Display for Instruction {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {

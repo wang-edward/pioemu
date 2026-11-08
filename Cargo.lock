@@ -678,8 +678,10 @@ dependencies = [
 name = "pioemu-app"
 version = "0.1.0"
 dependencies = [
+ "arbitrary-int",
  "pio",
  "pio-proc",
+ "pioemu",
  "pioemu-protocol",
  "serialport",
 ]
