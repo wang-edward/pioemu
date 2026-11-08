@@ -2,7 +2,6 @@ use crate::instr::{Condition, Instr, Instruction, mov, set, shift, wait};
 use arbitrary_int::u5;
 use std::cmp;
 use std::collections::VecDeque;
-use std::fmt;
 
 #[derive(Clone, Copy, Debug)]
 struct Range<const MIN: u8, const MAX: u8>(u8);
@@ -54,23 +53,6 @@ impl Fifo {
     }
 }
 
-impl fmt::Display for Fifo {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        if self.data.is_empty() {
-            write!(f, "[empty]")
-        } else {
-            write!(f, "[")?;
-            for (i, x) in self.data.iter().enumerate() {
-                if i > 0 {
-                    write!(f, ", ")?;
-                }
-                write!(f, "{:08x}", x)?;
-            }
-            write!(f, "] ({}/{})", self.data.len(), self.depth)
-        }
-    }
-}
-
 #[derive(Debug)]
 pub struct Block {
     pub instr_mem: [Option<Instr>; 32],
@@ -80,23 +62,6 @@ pub struct Block {
     pub gpio_in: u32,
     pub irq_flags: u8,
     cycle: u64,
-}
-
-impl fmt::Display for Block {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        writeln!(f, "=== PIO Block (cycle {}) ===", self.cycle)?;
-        writeln!(
-            f,
-            "gpio: out={:08x} dir={:08x} in={:08x}",
-            self.gpio_out, self.gpio_dir, self.gpio_in
-        )?;
-
-        // print state machines
-        for (i, sm) in self.sms.iter().enumerate() {
-            writeln!(f, "sm{}: {}", i, sm)?;
-        }
-        Ok(())
-    }
 }
 
 impl Block {
@@ -124,17 +89,6 @@ impl Block {
         }
         *cycle += 1;
     }
-    pub fn print_instr_mem(&self) {
-        println!("program:");
-        for (i, slot) in self.instr_mem.iter().enumerate() {
-            if let Some(instr) = slot {
-                println!("  {:02}: {}", i, instr);
-            }
-        }
-    }
-    pub fn print(&self) {
-        println!("{}", self);
-    }
 }
 
 #[derive(Debug)]
@@ -142,16 +96,6 @@ pub struct StateMachine {
     pub state: State,
     pub config: Config,
     pub enabled: bool,
-}
-
-impl fmt::Display for StateMachine {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        if self.enabled {
-            write!(f, "[on]  {}", self.state)
-        } else {
-            write!(f, "[off]")
-        }
-    }
 }
 
 pub fn to_mask(val: u8) -> u32 {
@@ -505,23 +449,6 @@ pub struct State {
     irq_wait: Option<u8>,
 }
 
-impl fmt::Display for State {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        writeln!(
-            f,
-            "pc={:02} x={:08x} y={:08x} osr={:08x}({}) isr={:08x}({})",
-            self.pc.value(),
-            self.x,
-            self.y,
-            self.osr,
-            self.osr_shift_count,
-            self.isr,
-            self.isr_shift_count,
-        )?;
-        write!(f, "    tx: {}  rx: {}", self.tx_fifo, self.rx_fifo)
-    }
-}
-
 impl State {
     fn new() -> Self {
         Self {
@@ -586,48 +513,6 @@ pub struct Config {
     // TODO clkdiv?
     // clkdiv_int: u16,
     // clkdiv_frac: u8,
-}
-
-impl fmt::Display for ShiftDir {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            ShiftDir::Left => write!(f, "L"),
-            ShiftDir::Right => write!(f, "R"),
-        }
-    }
-}
-
-impl fmt::Display for Config {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        writeln!(
-            f,
-            "  wrap={}..{} jmp_pin={}",
-            self.wrap_bottom.value(),
-            self.wrap_top.value(),
-            self.jmp_pin.value(),
-        )?;
-        writeln!(
-            f,
-            "  pins: out={}+{} set={}+{} in={} sideset={}+{}",
-            self.out_base.get(),
-            self.out_count.get(),
-            self.set_base.get(),
-            self.set_count.get(),
-            self.in_base.get(),
-            self.sideset_base.get(),
-            self.sideset_count.get(),
-        )?;
-        write!(
-            f,
-            "  shift: out={} in={} autopull={} autopush={} pull_thresh={} push_thresh={}",
-            self.out_shiftdir,
-            self.in_shiftdir,
-            if self.autopull { "on" } else { "off" },
-            if self.autopush { "on" } else { "off" },
-            self.pull_thresh.get(),
-            self.push_thresh.get(),
-        )
-    }
 }
 
 impl Config {

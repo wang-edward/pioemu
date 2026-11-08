@@ -55,4 +55,4 @@ optional side-set and bit 1 for pin directions; `side_bits` includes the optiona
 enable bit. Addresses, including JMP targets, are absolute.
 The firmware accepts requests split across USB packets. It responds with the CSV
 header, the requested rows, and `DONE`, or an `ERR message` line. Wait for completion
-before sending another request. The old single-character `r` command is replaced.
+before sending another request.
