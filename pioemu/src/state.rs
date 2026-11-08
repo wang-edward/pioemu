@@ -492,7 +492,7 @@ impl StateMachine {
             if self.state.pc == self.config.wrap_top {
                 self.state.pc = self.config.wrap_bottom;
             } else {
-                self.state.pc = u5::new(self.state.pc.value() + 1);
+                self.state.pc = u5::new((self.state.pc.value() + 1) % 32);
             }
         }
     }
