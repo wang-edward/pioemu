@@ -1,4 +1,4 @@
 [workspace]
-members = ["pioemu", "firmware", "app", "protocol"]
+members = ["pioemu", "firmware", "difftest", "protocol"]
 default-members = ["pioemu"]
 resolver = "3"

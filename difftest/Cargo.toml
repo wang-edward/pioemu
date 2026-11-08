@@ -1,10 +1,12 @@
 [package]
-name = "pioemu-app"
+name = "difftest"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+arbitrary-int = "1"
 pio = "0.2"
 pio-proc = "0.2"
+pioemu = { path = "../pioemu" }
 pioemu-protocol = { path = "../protocol" }
 serialport = { version = "4", default-features = false }

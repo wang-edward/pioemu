@@ -15,7 +15,7 @@ use usb_device::bus::UsbBusAllocator;
 use usb_device::device::{StringDescriptors, UsbDevice, UsbDeviceBuilder, UsbVidPid};
 use usbd_serial::{SerialPort, USB_CLASS_CDC};
 
-const CLOCK_DIVIDER: u16 = 60_000;
+const CLOCK_DIVIDER: u16 = 1_000;
 const MARKER_ORIGIN: usize = 30;
 
 #[derive(Clone, Copy)]
@@ -111,7 +111,7 @@ fn main() -> ! {
             for ticks_elapsed in 1..=request.ticks {
                 reset_and_initialize(&peripherals.RESETS, registers, &request);
 
-                for _ in 0..ticks_elapsed {
+                let overran = (0..ticks_elapsed).any(|_| {
                     let previous_marker_pc = registers.sm(1).sm_addr().read().bits();
                     cortex_m::interrupt::free(|_| {
                         // Enable/disable both SMs in the same write. The divider is
@@ -124,6 +124,11 @@ fn main() -> ! {
                     });
                     // Replays can be long; keep USB serviced between ticks.
                     usb.poll(&mut [&mut serial]);
+                    registers.sm(1).sm_addr().read().bits() == previous_marker_pc
+                });
+                if overran {
+                    send(&mut usb, &mut serial, b"ERR clock divider too fast to stop after one tick\r\n");
+                    break;
                 }
 
                 // Save non-destructive state before the diagnostic instructions alter SM0.
@@ -193,16 +198,10 @@ fn reset_and_initialize(resets: &pac::RESETS, registers: &pac::pio0::RegisterBlo
         spin_loop();
     }
 
-    for (offset, instruction) in request.code[..request.len].iter().enumerate() {
-        registers
-            .instr_mem(request.origin as usize + offset)
-            .write(|w| unsafe { w.bits(*instruction as u32) });
-    }
-    // Fixed machine code: NOP (MOV Y, Y), one instruction per marker tick.
-    for (offset, instruction) in [0xa042u16; 2].iter().enumerate() {
-        registers
-            .instr_mem(MARKER_ORIGIN + offset)
-            .write(|w| unsafe { w.bits(*instruction as u32) });
+    let mut code = [0u16; MARKER_ORIGIN];
+    code[request.origin as usize..][..request.len].copy_from_slice(&request.code[..request.len]);
+    for (slot, instruction) in code.iter().chain(&[0xa042; 2]).enumerate() {
+        registers.instr_mem(slot).write(|w| unsafe { w.bits(*instruction as u32) });
     }
 
     let configs = [

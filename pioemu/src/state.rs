@@ -46,8 +46,11 @@ impl Fifo {
     fn pop(&mut self) -> Option<u32> {
         self.data.pop_front()
     }
-    fn len(&self) -> usize {
+    pub fn len(&self) -> usize {
         self.data.len()
+    }
+    pub fn iter(&self) -> impl Iterator<Item = &u32> {
+        self.data.iter()
     }
 }
 
@@ -75,7 +78,7 @@ pub struct Block {
     pub gpio_out: u32,
     pub gpio_dir: u32,
     pub gpio_in: u32,
-    irq_flags: u8,
+    pub irq_flags: u8,
     cycle: u64,
 }
 
@@ -196,6 +199,13 @@ pub fn sat_shr(x: u32, n: u8) -> u32 {
 impl StateMachine {
     // TODO function for gpio in / out mapping
     fn execute(&mut self, instr: &Instr, gpio_out: &mut u32, gpio_dir: &mut u32, gpio_in: u32, irq_flags: &mut u8, sm_id: u8) {
+        if let Some(irq_index) = self.state.irq_wait {
+            if !bit_at(*irq_flags, irq_index) {
+                self.state.irq_wait = None;
+                self.state.stalled = false;
+            }
+            return;
+        }
         if self.state.delay_counter > 0 && !self.state.stalled {
             self.state.delay_counter -= 1;
             return;
@@ -418,31 +428,14 @@ impl StateMachine {
                 }
             }
             Instruction::Irq { clear, wait, index } => {
-                let (clear, wait, index) = (clear.value() == 1, wait.value() == 1, index.value());
-                let irq_index = calc_irq_index(index as u8, sm_id);
-
-                // irq_stalled implies this instr is being run for the 2nd time
-                // so it's "polling" whether the flag has been cleared by an external source
-                // - and not doing the normal instr behaviour
-                if self.state.irq_stalled {
-                    if bit_at(*irq_flags, irq_index) {
-                        self.state.stalled = true;
-                        return;
-                    } else {
-                        self.state.irq_stalled = false;
-                    }
-                // normal set / clear behaviour
+                let irq_index = calc_irq_index(index.value(), sm_id);
+                if clear.value() == 1 {
+                    *irq_flags &= !(1 << irq_index);
                 } else {
-                    if clear {
-                        *irq_flags &= !(1 << irq_index);
-                    } else {
-                        // set the flag
-                        *irq_flags |= 1 << irq_index;
-                        if wait {
-                            self.state.irq_stalled = true;
-                            self.state.stalled = true;
-                            return;
-                        }
+                    *irq_flags |= 1 << irq_index;
+                    if wait.value() == 1 {
+                        self.state.irq_wait = Some(irq_index);
+                        self.state.stalled = true;
                     }
                 }
             }
@@ -489,7 +482,7 @@ impl StateMachine {
             if self.state.pc == self.config.wrap_top {
                 self.state.pc = self.config.wrap_bottom;
             } else {
-                self.state.pc = u5::new(self.state.pc.value() + 1);
+                self.state.pc = u5::new((self.state.pc.value() + 1) % 32);
             }
         }
     }
@@ -509,7 +502,7 @@ pub struct State {
     pub rx_fifo: Fifo,
     pub delay_counter: u8,
     pub stalled: bool,
-    irq_stalled: bool,
+    irq_wait: Option<u8>,
 }
 
 impl fmt::Display for State {
@@ -543,7 +536,7 @@ impl State {
             rx_fifo: Fifo::new(FIFO_DEPTH),
             delay_counter: 0,
             stalled: false,
-            irq_stalled: false,
+            irq_wait: None,
         }
     }
 }
@@ -664,6 +657,10 @@ impl Config {
             fjoin_rx: false,
             fjoin_tx: false,
         }
+    }
+    pub fn set_wrap(&mut self, bottom: u5, top: u5) {
+        self.wrap_bottom = bottom;
+        self.wrap_top = top;
     }
     fn calc_pull_thresh(&self) -> u8 {
         if self.pull_thresh.get() == 0 { 32 } else { self.pull_thresh.get() }
