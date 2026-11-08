@@ -1,6 +1,8 @@
 MIT License
 
 Copyright (c) 2026 Edward Wang
+Portions of firmware/ derived from the rp-rs rp235x-project-template:
+Copyright (c) 2021 rp-rs organization
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
