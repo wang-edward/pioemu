@@ -8,7 +8,6 @@ use pioemu::state::Block;
 use pioemu_protocol::{CSV_HEADER, MAX_WORDS, Request};
 use serialport::{SerialPort, SerialPortType};
 
-const TICKS: u32 = 16;
 const RANDOM_TICKS: u32 = 32;
 const RANDOM_MAX_LEN: u64 = 8;
 const MARKER_NOP: u16 = 0xa042;
@@ -17,40 +16,9 @@ const UNCOMPARED: [&str; 2] = ["stalled", "fdebug"];
 fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
-        [] => run_fixed(),
-        ["random", count] => run_random(count.parse()?, SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos() as u64),
-        ["random", count, seed] => run_random(count.parse()?, seed.parse()?),
-        _ => Err("usage: difftest [random <count> [seed]]".into()),
-    }
-}
-
-fn run_fixed() -> Result<(), Box<dyn Error>> {
-    let program = pio_proc::pio_asm!(
-        ".origin 0",
-        ".wrap_target",
-        "set x, 3",
-        "count:",
-        "jmp x-- count [2]",
-        "pull block",
-        ".wrap",
-    )
-    .program;
-
-    let request = make_request(&program, TICKS)?;
-    let rows = Hardware::open()?.run(&request)?;
-    println!("{CSV_HEADER}\n{}", rows.join("\n"));
-    match first_difference(&rows, &emulate(&request)) {
-        None => {
-            println!(
-                "Emulator matches hardware for all {TICKS} ticks ({} not compared)",
-                UNCOMPARED.join(", ")
-            );
-            Ok(())
-        }
-        Some(difference) => {
-            eprint!("{difference}");
-            Err("Emulator mismatch".into())
-        }
+        [count] => run_random(count.parse()?, SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos() as u64),
+        [count, seed] => run_random(count.parse()?, seed.parse()?),
+        _ => Err("usage: difftest <count> [seed]".into()),
     }
 }
 
@@ -206,38 +174,6 @@ fn first_difference(hardware: &[String], emulator: &[String]) -> Option<String> 
     })
 }
 
-fn make_request(program: &pio::Program<32>, ticks: u32) -> Result<Request, &'static str> {
-    let origin = program.origin.unwrap_or(0);
-    if program.code.len() > MAX_WORDS || origin as usize + program.code.len() > MAX_WORDS {
-        return Err("Program must fit in instruction slots 0..29");
-    }
-    let mut request = Request {
-        ticks,
-        origin,
-        wrap_target: origin + program.wrap.target,
-        wrap_source: origin + program.wrap.source,
-        side_bits: program.side_set.bits(),
-        side_optional: program.side_set.optional(),
-        side_pindirs: program.side_set.pindirs(),
-        len: program.code.len(),
-        code: [0; MAX_WORDS],
-    };
-    for (destination, word) in request.code.iter_mut().zip(&program.code) {
-        // The assembler emits relative JMP addresses even with .origin.
-        *destination = if word >> 13 == 0 {
-            let address = (word & 31) + origin as u16;
-            if address >= MAX_WORDS as u16 {
-                return Err("JMP targets reserved or out-of-range instruction slot");
-            }
-            (word & !31) | address
-        } else {
-            *word
-        };
-    }
-    request.validate()?;
-    Ok(request)
-}
-
 struct Rng(u64);
 
 impl Rng {
@@ -311,41 +247,20 @@ fn disassemble(request: &Request) -> String {
 mod tests {
     use super::*;
     #[test]
-    fn assembled_program_round_trip() {
-        let program = pio_proc::pio_asm!(
-            ".origin 4",
-            ".side_set 1 opt",
-            ".wrap_target",
-            "set x, 3 side 1",
-            "loop:",
-            "jmp x-- loop [2]",
-            "pull block",
-            ".wrap"
-        )
-        .program;
-        let request = make_request(&program, 16).unwrap();
-        assert_eq!(request.code[1] & 31, 5);
-        assert_eq!((request.wrap_target, request.wrap_source), (4, 6));
-        assert_eq!(request.side_bits, 2);
-        assert!(request.side_optional);
-        let mut wire = String::new();
-        request.write(&mut wire).unwrap();
-        assert_eq!(Request::parse(&wire).unwrap(), request);
-    }
-    #[test]
     fn emulated_trace() {
-        let program = pio_proc::pio_asm!(
-            ".origin 4",
-            ".side_set 1 opt",
-            ".wrap_target",
-            "set x, 3 side 1",
-            "loop:",
-            "jmp x-- loop [2]",
-            "pull block",
-            ".wrap"
-        )
-        .program;
-        let rows = emulate(&make_request(&program, 16).unwrap());
+        let mut request = Request {
+            ticks: 16,
+            origin: 4,
+            wrap_target: 4,
+            wrap_source: 6,
+            side_bits: 2,
+            side_optional: true,
+            side_pindirs: false,
+            len: 3,
+            code: [0; MAX_WORDS],
+        };
+        request.code[..3].copy_from_slice(&[0xf823, 0x0245, 0x80a0]);
+        let rows = emulate(&request);
         let field = |tick: usize, column: &str| {
             let index = CSV_HEADER.split(',').position(|c| c == column).unwrap();
             rows[tick - 1].split(',').nth(index).unwrap().to_owned()
