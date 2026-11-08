@@ -35,7 +35,7 @@ impl Fifo {
     fn is_empty(&self) -> bool {
         self.data.is_empty()
     }
-    fn push(&mut self, val: u32) -> bool {
+    pub fn push(&mut self, val: u32) -> bool {
         if self.is_full() {
             return false;
         }
@@ -499,7 +499,7 @@ pub struct Config {
     wrap_top: u5,
     wrap_bottom: u5,
     status_sel: StatusSel,
-    status_n: Range<0, 15>,
+    status_n: Range<0, 31>,
 
     // shiftctrl
     pull_thresh: Range<0, 31>,
@@ -518,34 +518,45 @@ pub struct Config {
 impl Config {
     // TODO pull_thresh override 32 = 0 and fifo_depth if fjoin
     fn new() -> Self {
-        Self {
-            out_base: PinRange::new(0),
-            out_count: Range::new(0),
-            set_base: PinRange::new(0),
-            set_count: Range::new(5),
-            in_base: PinRange::new(0),
-            sideset_base: PinRange::new(0),
-            sideset_count: Range::new(0),
-            sideset_en: false,
-            side_pindir: false,
-            jmp_pin: u5::new(0),
-            wrap_top: u5::new(0x1f),
-            wrap_bottom: u5::new(0),
-            status_sel: StatusSel::TxLevel,
-            status_n: Range::new(0),
-            pull_thresh: Range::new(0),
-            push_thresh: Range::new(0),
-            out_shiftdir: ShiftDir::Right,
-            in_shiftdir: ShiftDir::Right,
-            autopull: false,
-            autopush: false,
-            fjoin_rx: false,
-            fjoin_tx: false,
-        }
+        Self::from_registers(0x0001_f000, 0x000c_0000, 0x1400_0000)
     }
-    pub fn set_wrap(&mut self, bottom: u5, top: u5) {
-        self.wrap_bottom = bottom;
-        self.wrap_top = top;
+    pub fn from_registers(execctrl: u32, shiftctrl: u32, pinctrl: u32) -> Self {
+        let field = |register: u32, lsb: u32, bits: u32| ((register >> lsb) & ((1 << bits) - 1)) as u8;
+        let shift_dir = |bit| {
+            if field(shiftctrl, bit, 1) == 1 {
+                ShiftDir::Right
+            } else {
+                ShiftDir::Left
+            }
+        };
+        Self {
+            out_base: Range::new(field(pinctrl, 0, 5)),
+            out_count: Range::new(field(pinctrl, 20, 6)),
+            set_base: Range::new(field(pinctrl, 5, 5)),
+            set_count: Range::new(field(pinctrl, 26, 3)),
+            in_base: Range::new(field(pinctrl, 15, 5)),
+            sideset_base: Range::new(field(pinctrl, 10, 5)),
+            sideset_count: Range::new(field(pinctrl, 29, 3)),
+            sideset_en: field(execctrl, 30, 1) == 1,
+            side_pindir: field(execctrl, 29, 1) == 1,
+            jmp_pin: u5::new(field(execctrl, 24, 5)),
+            wrap_top: u5::new(field(execctrl, 12, 5)),
+            wrap_bottom: u5::new(field(execctrl, 7, 5)),
+            status_sel: match field(execctrl, 5, 2) {
+                0 => StatusSel::TxLevel,
+                1 => StatusSel::RxLevel,
+                _ => panic!(),
+            },
+            status_n: Range::new(field(execctrl, 0, 5)),
+            pull_thresh: Range::new(field(shiftctrl, 25, 5)),
+            push_thresh: Range::new(field(shiftctrl, 20, 5)),
+            out_shiftdir: shift_dir(19),
+            in_shiftdir: shift_dir(18),
+            autopull: field(shiftctrl, 17, 1) == 1,
+            autopush: field(shiftctrl, 16, 1) == 1,
+            fjoin_rx: field(shiftctrl, 31, 1) == 1,
+            fjoin_tx: field(shiftctrl, 30, 1) == 1,
+        }
     }
     fn calc_pull_thresh(&self) -> u8 {
         if self.pull_thresh.get() == 0 { 32 } else { self.pull_thresh.get() }

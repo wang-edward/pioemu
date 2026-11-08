@@ -29,7 +29,6 @@ struct SmConfig {
 struct Snapshot {
     test_pc: u32,
     marker_pc: u32,
-    stalled: bool,
     padout: u32,
     padoe: u32,
     irq: u8,
@@ -109,6 +108,9 @@ fn main() -> ! {
             send(&mut usb, &mut serial, b"\r\n");
 
             for ticks_elapsed in 1..=request.ticks {
+                if !serial.dtr() {
+                    break;
+                }
                 reset_and_initialize(&peripherals.RESETS, registers, &request);
 
                 let overran = (0..ticks_elapsed).any(|_| {
@@ -135,7 +137,6 @@ fn main() -> ! {
                 let snapshot = Snapshot {
                     test_pc: registers.sm(0).sm_addr().read().bits(),
                     marker_pc: registers.sm(1).sm_addr().read().bits(),
-                    stalled: registers.sm(0).sm_execctrl().read().exec_stalled().bit_is_set(),
                     padout: registers.dbg_padout().read().bits(),
                     padoe: registers.dbg_padoe().read().bits(),
                     irq: registers.irq().read().bits() as u8,
@@ -161,11 +162,10 @@ fn main() -> ! {
                 let mut line = String::<320>::new();
                 writeln!(
                     line,
-                    "{},{},{},{},{:08x},{:08x},{:02x},{:08x},{:08x},{},{:08x},{:08x},{:08x},{:08x},{:08x},{:08x},{:08x},{:08x}\r",
+                    "{},{},{},{:08x},{:08x},{:02x},{:08x},{:08x},{},{:08x},{:08x},{:08x},{:08x},{:08x},{:08x},{:08x},{:08x}\r",
                     ticks_elapsed,
                     snapshot.test_pc,
                     snapshot.marker_pc,
-                    snapshot.stalled as u8,
                     snapshot.padout,
                     snapshot.padoe,
                     snapshot.irq,
@@ -207,13 +207,9 @@ fn reset_and_initialize(resets: &pac::RESETS, registers: &pac::pio0::RegisterBlo
     let configs = [
         SmConfig {
             clkdiv: (CLOCK_DIVIDER as u32) << 16,
-            execctrl: ((request.wrap_target as u32) << 7)
-                | ((request.wrap_source as u32) << 12)
-                | ((request.side_optional as u32) << 30)
-                | ((request.side_pindirs as u32) << 29),
-            // Match PIOBuilder defaults: shift right, no automatic push/pull.
-            shiftctrl: (1 << 18) | (1 << 19),
-            pinctrl: (5 << 26) | ((request.side_bits as u32) << 29),
+            execctrl: request.execctrl,
+            shiftctrl: request.shiftctrl,
+            pinctrl: request.pinctrl,
         },
         SmConfig { clkdiv: (CLOCK_DIVIDER as u32) << 16, execctrl: (30 << 7) | (31 << 12), shiftctrl: (1 << 18) | (1 << 19), pinctrl: 0 },
     ];
@@ -232,6 +228,9 @@ fn reset_and_initialize(resets: &pac::RESETS, registers: &pac::pio0::RegisterBlo
         .sm(1)
         .sm_instr()
         .write(|w| unsafe { w.bits(jmp(MARKER_ORIGIN as u8) as u32) });
+    for word in &request.tx[..request.tx_len] {
+        registers.txf(0).write(|w| unsafe { w.bits(*word) });
+    }
 
     // Restart both divided clocks in one write so future grouped starts are aligned.
     registers.ctrl().write(|w| unsafe { w.bits(0b11 << 8) });
@@ -279,11 +278,11 @@ fn jmp(address: u8) -> u16 {
 fn send(usb: &mut UsbDevice<'_, hal::usb::UsbBus>, serial: &mut SerialPort<'_, hal::usb::UsbBus>, mut bytes: &[u8]) {
     while !bytes.is_empty() {
         match serial.write(bytes) {
-            Ok(0) | Err(usb_device::UsbError::WouldBlock) => {
+            Ok(count) if count > 0 => bytes = &bytes[count..],
+            Ok(_) | Err(usb_device::UsbError::WouldBlock) if serial.dtr() => {
                 usb.poll(&mut [serial]);
             }
-            Ok(count) => bytes = &bytes[count..],
-            Err(_) => return,
+            _ => return,
         }
     }
 }
