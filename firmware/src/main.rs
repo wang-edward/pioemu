@@ -193,16 +193,10 @@ fn reset_and_initialize(resets: &pac::RESETS, registers: &pac::pio0::RegisterBlo
         spin_loop();
     }
 
-    for (offset, instruction) in request.code[..request.len].iter().enumerate() {
-        registers
-            .instr_mem(request.origin as usize + offset)
-            .write(|w| unsafe { w.bits(*instruction as u32) });
-    }
-    // Fixed machine code: NOP (MOV Y, Y), one instruction per marker tick.
-    for (offset, instruction) in [0xa042u16; 2].iter().enumerate() {
-        registers
-            .instr_mem(MARKER_ORIGIN + offset)
-            .write(|w| unsafe { w.bits(*instruction as u32) });
+    let mut code = [0u16; MARKER_ORIGIN];
+    code[request.origin as usize..][..request.len].copy_from_slice(&request.code[..request.len]);
+    for (slot, instruction) in code.iter().chain(&[0xa042; 2]).enumerate() {
+        registers.instr_mem(slot).write(|w| unsafe { w.bits(*instruction as u32) });
     }
 
     let configs = [

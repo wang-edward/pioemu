@@ -672,12 +672,6 @@ impl Config {
         self.wrap_bottom = bottom;
         self.wrap_top = top;
     }
-    /// `count` includes the optional enable bit, like SMx_PINCTRL.SIDESET_COUNT.
-    pub fn set_sideset(&mut self, count: u8, optional: bool, pindirs: bool) {
-        self.sideset_count = Range::new(count);
-        self.sideset_en = optional;
-        self.side_pindir = pindirs;
-    }
     fn calc_pull_thresh(&self) -> u8 {
         if self.pull_thresh.get() == 0 { 32 } else { self.pull_thresh.get() }
     }

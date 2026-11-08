@@ -87,9 +87,7 @@ pub struct Instr {
 }
 
 impl Instr {
-    /// Decodes a machine-code word. `side_bits` includes the optional enable bit, like SMx_PINCTRL.SIDESET_COUNT.
     pub fn decode(word: u16, side_bits: u8, side_optional: bool) -> Self {
-        assert!(side_bits <= 5 && !(side_optional && side_bits == 0), "invalid side-set config");
         let (a, b) = (((word >> 5) & 7) as usize, (word & 31) as u8);
         let bit = |i: usize| u1::new(((a >> i) & 1) as u8);
         let instruction = match word >> 13 {
@@ -150,7 +148,6 @@ impl Instr {
             }
         };
 
-        // Side-set takes the top `side_bits` of the delay field; with `opt`, its MSB enables it.
         let field = ((word >> 8) & 31) as u8;
         let delay_bits = 5 - side_bits;
         let side = field >> delay_bits;
