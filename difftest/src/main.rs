@@ -5,7 +5,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use arbitrary_int::u5;
 use pioemu::instr::Instr;
 use pioemu::state::{Block, Config};
-use pioemu_protocol::{CSV_HEADER, MAX_TX, MAX_WORDS, Request};
+use pioemu_protocol::{CSV_HEADER, MAX_TX, MAX_WORDS, Request, osr_reachable};
 use serialport::{SerialPort, SerialPortType};
 
 const RANDOM_TICKS: u32 = 32;
@@ -126,6 +126,13 @@ fn emulate(request: &Request) -> Vec<String> {
     for word in &request.tx[..request.tx_len] {
         test.state.tx_fifo.push(*word);
     }
+    test.state.x = request.x;
+    test.state.y = request.y;
+    test.state.isr = request.isr;
+    test.state.isr_shift_count = request.isr_count;
+    test.state.osr = request.osr;
+    test.state.osr_shift_count = request.osr_count;
+    block.irq_flags = request.irq;
     marker.config = Config::from_registers(MARKER_EXECCTRL, 0x000c_0000, 0);
     marker.state.pc = u5::new(MAX_WORDS as u8);
     test.enabled = true;
@@ -211,6 +218,15 @@ fn random_word(rng: &mut Rng, origin: u8, len: usize) -> u16 {
     opcode << 13 | delay << 8 | a << 5 | b
 }
 
+fn random_value(rng: &mut Rng) -> u32 {
+    match rng.below(4) {
+        0 => 0,
+        1 => u32::MAX,
+        2 => 1 << rng.below(32),
+        _ => rng.next() as u32,
+    }
+}
+
 fn random_request(rng: &mut Rng) -> Request {
     let len = 1 + rng.below(RANDOM_MAX_LEN) as usize;
     let origin = rng.below((MAX_WORDS - len + 1) as u64) as u8;
@@ -230,23 +246,38 @@ fn random_request(rng: &mut Rng) -> Request {
         code: [0; MAX_WORDS],
         tx_len: rng.below(MAX_TX as u64 + 1) as usize,
         tx: [0; MAX_TX],
+        x: random_value(rng),
+        y: random_value(rng),
+        isr: random_value(rng),
+        isr_count: rng.below(33) as u8,
+        osr: random_value(rng),
+        osr_count: rng.below(33) as u8,
+        irq: rng.below(256) as u8,
     };
+    request.osr = osr_reachable(request.osr, request.osr_count, request.out_shift_right());
     for word in &mut request.code[..len] {
         *word = random_word(rng, origin, len);
     }
     for word in &mut request.tx[..request.tx_len] {
-        *word = rng.next() as u32;
+        *word = random_value(rng);
     }
     request
 }
 
 fn disassemble(request: &Request) -> String {
     let mut text = format!(
-        "  execctrl {:08x}, shiftctrl {:08x}, pinctrl {:08x}, tx {:08x?}\n",
+        "  execctrl {:08x}, shiftctrl {:08x}, pinctrl {:08x}, tx {:08x?}\n  x {:08x}, y {:08x}, isr {:08x} ({}), osr {:08x} ({}), irq {:02x}\n",
         request.execctrl,
         request.shiftctrl,
         request.pinctrl,
-        &request.tx[..request.tx_len]
+        &request.tx[..request.tx_len],
+        request.x,
+        request.y,
+        request.isr,
+        request.isr_count,
+        request.osr,
+        request.osr_count,
+        request.irq
     );
     for (slot, word) in (request.origin as usize..).zip(&request.code[..request.len]) {
         text += &format!(
@@ -272,6 +303,13 @@ mod tests {
             code: [0; MAX_WORDS],
             tx_len: 0,
             tx: [0; MAX_TX],
+            x: 0,
+            y: 0,
+            isr: 0,
+            isr_count: 0,
+            osr: 0,
+            osr_count: 32,
+            irq: 0,
         };
         request.code[..3].copy_from_slice(&[0xf823, 0x0245, 0x80a0]);
         let rows = emulate(&request);

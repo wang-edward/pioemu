@@ -223,6 +223,7 @@ fn reset_and_initialize(resets: &pac::RESETS, registers: &pac::pio0::RegisterBlo
 
     // Clear pending instructions, stalls, delays and shift counters in both SMs.
     registers.ctrl().write(|w| unsafe { w.bits(0b11 << 4) });
+    load_state(registers, request);
     inject(registers, jmp(request.origin));
     registers
         .sm(1)
@@ -234,6 +235,54 @@ fn reset_and_initialize(resets: &pac::RESETS, registers: &pac::pio0::RegisterBlo
 
     // Restart both divided clocks in one write so future grouped starts are aligned.
     registers.ctrl().write(|w| unsafe { w.bits(0b11 << 8) });
+}
+
+fn load_state(registers: &pac::pio0::RegisterBlock, request: &Request) {
+    let sm = registers.sm(0);
+    sm.sm_clkdiv().write(|w| unsafe { w.bits(1 << 16) });
+    sm.sm_shiftctrl().write(|w| unsafe { w.bits(request.shiftctrl & !(0b11 << 16)) });
+
+    let (isr, isr_in) = match (request.isr_count, request.in_shift_right()) {
+        (0, _) => (request.isr, 0),
+        (32, _) => (0, request.isr),
+        (count, false) => (request.isr >> count, request.isr & ((1 << count) - 1)),
+        (count, true) => (request.isr << count, request.isr >> (32 - count)),
+    };
+    load_osr(registers, isr);
+    execute(registers, 0xa0c7); // MOV ISR, OSR
+    if request.isr_count > 0 {
+        load_osr(registers, isr_in);
+        execute(registers, 0x40e0 | (request.isr_count as u16 & 31)); // IN OSR, count
+    }
+    load_osr(registers, request.x);
+    execute(registers, 0xa027); // MOV X, OSR
+    load_osr(registers, request.y);
+    execute(registers, 0xa047); // MOV Y, OSR
+    let osr = match (request.osr_count, request.out_shift_right()) {
+        (0 | 32, _) => request.osr,
+        (count, true) => request.osr << count,
+        (count, false) => request.osr >> count,
+    };
+    load_osr(registers, osr);
+    if request.osr_count > 0 {
+        execute(registers, 0x6060 | (request.osr_count as u16 & 31)); // OUT NULL, count
+    }
+
+    registers.irq_force().write(|w| unsafe { w.bits(request.irq as u32) });
+    sm.sm_shiftctrl().write(|w| unsafe { w.bits(request.shiftctrl) });
+    sm.sm_clkdiv().write(|w| unsafe { w.bits((CLOCK_DIVIDER as u32) << 16) });
+}
+
+fn load_osr(registers: &pac::pio0::RegisterBlock, word: u32) {
+    registers.txf(0).write(|w| unsafe { w.bits(word) });
+    execute(registers, 0x80a0); // PULL BLOCK
+}
+
+fn execute(registers: &pac::pio0::RegisterBlock, instruction: u16) {
+    inject(registers, instruction);
+    while registers.sm(0).sm_execctrl().read().exec_stalled().bit_is_set() {
+        spin_loop();
+    }
 }
 
 fn extract_hidden_registers(registers: &pac::pio0::RegisterBlock) -> Option<[u32; 4]> {
