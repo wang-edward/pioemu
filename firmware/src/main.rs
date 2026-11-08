@@ -15,7 +15,7 @@ use usb_device::bus::UsbBusAllocator;
 use usb_device::device::{StringDescriptors, UsbDevice, UsbDeviceBuilder, UsbVidPid};
 use usbd_serial::{SerialPort, USB_CLASS_CDC};
 
-const CLOCK_DIVIDER: u16 = 60_000;
+const CLOCK_DIVIDER: u16 = 1_000;
 const MARKER_ORIGIN: usize = 30;
 
 #[derive(Clone, Copy)]
@@ -111,7 +111,7 @@ fn main() -> ! {
             for ticks_elapsed in 1..=request.ticks {
                 reset_and_initialize(&peripherals.RESETS, registers, &request);
 
-                for _ in 0..ticks_elapsed {
+                let overran = (0..ticks_elapsed).any(|_| {
                     let previous_marker_pc = registers.sm(1).sm_addr().read().bits();
                     cortex_m::interrupt::free(|_| {
                         // Enable/disable both SMs in the same write. The divider is
@@ -124,6 +124,11 @@ fn main() -> ! {
                     });
                     // Replays can be long; keep USB serviced between ticks.
                     usb.poll(&mut [&mut serial]);
+                    registers.sm(1).sm_addr().read().bits() == previous_marker_pc
+                });
+                if overran {
+                    send(&mut usb, &mut serial, b"ERR clock divider too fast to stop after one tick\r\n");
+                    break;
                 }
 
                 // Save non-destructive state before the diagnostic instructions alter SM0.

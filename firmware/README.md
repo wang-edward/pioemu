@@ -31,7 +31,7 @@ by VID/PID and prints the trace. Connect only one pioemu device at a time.
 prints the seed of each one that differs, so `random 1 <seed>` reruns it.
 
 SM0 runs the uploaded program. SM1 runs two fixed NOPs in slots 30 and 31 as a
-clock marker. Both use a divider of 60,000 and start/stop together, so the marker
+clock marker. Both use a divider of 1,000 and start/stop together, so the marker
 PC measures a tick even during SM0 delay cycles or stalls. Uploaded programs must
 fit in slots 0–29. Tick counts are limited to 1–1000.
 
