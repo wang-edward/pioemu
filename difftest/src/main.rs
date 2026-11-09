@@ -208,9 +208,9 @@ fn random_word(rng: &mut Rng, origin: u8, len: usize) -> u16 {
         0 => (0, rng.pick(&[0, 1, 2, 3, 4, 5, 7]), origin as u16 + rng.below(len as u64)),
         1 => (1, rng.below(2) << 2 | 2, rng.below(8)),
         2 => (2, rng.pick(&[1, 2, 3, 6, 7]), rng.below(32)),
-        3 => (3, rng.pick(&[0, 1, 2, 3, 4, 6]), rng.below(32)),
+        3 => (3, rng.below(8), rng.below(32)),
         4 => (4, rng.below(8), 0),
-        5 => (5, rng.pick(&[0, 1, 2, 6, 7]), rng.below(3) << 3 | rng.pick(&[1, 2, 3, 5, 6, 7])),
+        5 => (5, rng.below(8), rng.below(3) << 3 | rng.pick(&[1, 2, 3, 5, 6, 7])),
         6 => (6, rng.below(4), rng.pick(&[0, 2]) << 3 | rng.below(8)),
         _ => (7, rng.pick(&[0, 1, 2, 4]), rng.below(32)),
     };
@@ -218,11 +218,12 @@ fn random_word(rng: &mut Rng, origin: u8, len: usize) -> u16 {
     opcode << 13 | delay << 8 | a << 5 | b
 }
 
-fn random_value(rng: &mut Rng) -> u32 {
-    match rng.below(4) {
+fn random_value(rng: &mut Rng, origin: u8, len: usize) -> u32 {
+    match rng.below(5) {
         0 => 0,
         1 => u32::MAX,
         2 => 1 << rng.below(32),
+        3 => random_word(rng, origin, len) as u32,
         _ => rng.next() as u32,
     }
 }
@@ -248,11 +249,11 @@ fn random_request(rng: &mut Rng) -> Request {
         code: [0; MAX_WORDS],
         tx_len: rng.below(MAX_TX as u64 + 1) as usize,
         tx: [0; MAX_TX],
-        x: random_value(rng),
-        y: random_value(rng),
-        isr: random_value(rng),
+        x: random_value(rng, origin, len),
+        y: random_value(rng, origin, len),
+        isr: random_value(rng, origin, len),
         isr_count: rng.below(33) as u8,
-        osr: random_value(rng),
+        osr: random_value(rng, origin, len),
         osr_count: rng.below(33) as u8,
         irq: rng.below(256) as u8,
     };
@@ -261,7 +262,7 @@ fn random_request(rng: &mut Rng) -> Request {
         *word = random_word(rng, origin, len);
     }
     for word in &mut request.tx[..request.tx_len] {
-        *word = random_value(rng);
+        *word = random_value(rng, origin, len);
     }
     request
 }

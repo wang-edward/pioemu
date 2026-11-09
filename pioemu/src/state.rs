@@ -83,7 +83,10 @@ impl Block {
                 continue;
             }
             let pc = sm.state.pc.value() as usize;
-            let instr = instr_mem[pc].expect("no instruction at PC");
+            let instr = match sm.state.exec {
+                Some(word) => Instr::decode(word, sm.config.sideset_count.get(), sm.config.sideset_en),
+                None => instr_mem[pc].expect("no instruction at PC"),
+            };
 
             sm.execute(&instr, gpio_out, gpio_dir, *gpio_in, irq_flags, i as u8);
         }
@@ -160,6 +163,7 @@ impl StateMachine {
             (None, true) => self.state.delay_counter -= 1,
             (None, false) => {
                 let mut advance_pc = true;
+                let exec = self.state.exec.take();
                 self.state.stalled = false;
                 match instr.instruction {
                     Instruction::Jmp { condition, address } => {
@@ -262,14 +266,14 @@ impl StateMachine {
                                     write_pins(gpio_dir, data, self.config.out_base.get(), self.config.out_count.get());
                                 }
                                 shift::Destn::Pc => {
-                                    self.state.pc = u5::new(data as u8);
+                                    self.state.pc = u5::new(data as u8 & 31);
                                     advance_pc = false;
                                 }
                                 shift::Destn::Isr => {
                                     self.state.isr = data;
                                     self.state.isr_shift_count = bit_count;
                                 }
-                                shift::Destn::Exec => panic!(), // todo EXEC destn. i think we need to have bit decoding for this to work
+                                shift::Destn::Exec => self.state.exec = Some(data as u16),
                             }
 
                             self.state.osr_shift_count = cmp::min(32, self.state.osr_shift_count + bit_count);
@@ -338,8 +342,14 @@ impl StateMachine {
                             }
                             mov::Destn::X => self.state.x = data,
                             mov::Destn::Y => self.state.y = data,
-                            mov::Destn::Exec => panic!(), // TODO exec
-                            mov::Destn::Pc => self.state.pc = u5::new(data as u8),
+                            mov::Destn::PinDirs => {
+                                write_pins(gpio_dir, data, self.config.out_base.get(), self.config.out_count.get());
+                            }
+                            mov::Destn::Exec => self.state.exec = Some(data as u16),
+                            mov::Destn::Pc => {
+                                self.state.pc = u5::new(data as u8 & 31);
+                                advance_pc = false;
+                            }
                             mov::Destn::Isr => {
                                 self.state.isr = data;
                                 self.state.isr_shift_count = 0;
@@ -348,7 +358,6 @@ impl StateMachine {
                                 self.state.osr = data;
                                 self.state.osr_shift_count = 0;
                             }
-                            _ => panic!(),
                         }
                     }
                     Instruction::Irq { clear, wait, index } => {
@@ -394,9 +403,11 @@ impl StateMachine {
                     let count = self.config.sideset_count.get() - self.config.sideset_en as u8;
                     write_pins(pins, value.value() as u32, self.config.sideset_base.get(), count);
                 }
-                if !self.state.stalled {
+                if self.state.stalled {
+                    self.state.exec = exec;
+                } else {
                     self.state.delay_counter = instr.delay.value();
-                    if advance_pc {
+                    if advance_pc && exec.is_none() {
                         if self.state.pc == self.config.wrap_top {
                             self.state.pc = self.config.wrap_bottom;
                         } else {
@@ -429,6 +440,7 @@ pub struct State {
     pub delay_counter: u8,
     pub stalled: bool,
     irq_wait: Option<u8>,
+    exec: Option<u16>,
 }
 
 impl State {
@@ -446,6 +458,7 @@ impl State {
             delay_counter: 0,
             stalled: false,
             irq_wait: None,
+            exec: None,
         }
     }
 }

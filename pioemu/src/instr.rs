@@ -22,7 +22,7 @@ pub mod shift {
 #[rustfmt::skip]
 pub mod mov {
     #[derive(Clone, Copy, Debug)]
-    pub enum Destn { Pins, X, Y, Reserved, Exec, Pc, Isr, Osr }
+    pub enum Destn { Pins, X, Y, PinDirs, Exec, Pc, Isr, Osr }
     #[derive(Clone, Copy, Debug)]
     pub enum Op { None, Invert, BitReverse, Reserved }
     #[derive(Clone, Copy, Debug)]
@@ -122,7 +122,7 @@ impl Instr {
                         Destn::Pins,
                         Destn::X,
                         Destn::Y,
-                        Destn::Reserved,
+                        Destn::PinDirs,
                         Destn::Exec,
                         Destn::Pc,
                         Destn::Isr,
@@ -225,11 +225,11 @@ impl fmt::Display for Instruction {
                     mov::Destn::Pins => "pins",
                     mov::Destn::X => "x",
                     mov::Destn::Y => "y",
+                    mov::Destn::PinDirs => "pindirs",
                     mov::Destn::Exec => "exec",
                     mov::Destn::Pc => "pc",
                     mov::Destn::Isr => "isr",
                     mov::Destn::Osr => "osr",
-                    _ => "???",
                 };
                 let src = match source {
                     mov::Source::Pins => "pins",
