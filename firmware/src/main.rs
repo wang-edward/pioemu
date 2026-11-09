@@ -158,9 +158,18 @@ fn main() -> ! {
                     fdebug: registers.fdebug().read().bits(),
                 };
 
+                let putget = registers.sm(0).sm_shiftctrl().read().bits() >> 14 & 3;
+                if putget == 3 {
+                    registers.sm(0).sm_shiftctrl().modify(|r, w| unsafe { w.bits(r.bits() & !(1 << 14)) });
+                }
                 let mut rx_words = [0u32; 4];
+                if putget != 0 {
+                    for (index, word) in rx_words.iter_mut().enumerate() {
+                        *word = registers.rxf0_putget(index).read().bits();
+                    }
+                }
                 let mut rx_count = 0usize;
-                while registers.fstat().read().rxempty().bits() & 1 == 0 {
+                while putget == 0 && registers.fstat().read().rxempty().bits() & 1 == 0 {
                     let word = registers.rxf(0).read().bits();
                     if rx_count < rx_words.len() {
                         rx_words[rx_count] = word;
@@ -221,6 +230,11 @@ fn reset_and_initialize(resets: &pac::RESETS, registers: &pac::pio0::RegisterBlo
         registers.instr_mem(slot).write(|w| unsafe { w.bits(*instruction as u32) });
     }
 
+    registers.sm(0).sm_shiftctrl().write(|w| unsafe { w.bits(1 << 14) });
+    for index in 0..4 {
+        registers.rxf0_putget(index).write(|w| unsafe { w.bits(0) });
+    }
+
     let configs = [
         SmConfig {
             clkdiv: (CLOCK_DIVIDER as u32) << 16,
@@ -257,7 +271,7 @@ fn reset_and_initialize(resets: &pac::RESETS, registers: &pac::pio0::RegisterBlo
 fn load_state(registers: &pac::pio0::RegisterBlock, request: &Request) {
     let sm = registers.sm(0);
     sm.sm_clkdiv().write(|w| unsafe { w.bits(1 << 16) });
-    sm.sm_shiftctrl().write(|w| unsafe { w.bits(request.shiftctrl & !(0b11 << 16 | 0b11 << 30)) });
+    sm.sm_shiftctrl().write(|w| unsafe { w.bits(request.shiftctrl & !(0b1111 << 14 | 0b11 << 30)) });
 
     let (isr, isr_in) = match (request.isr_count, request.in_shift_right()) {
         (0, _) => (request.isr, 0),
@@ -306,7 +320,7 @@ fn extract_hidden_registers(registers: &pac::pio0::RegisterBlock) -> Option<[u32
     registers
         .sm(0)
         .sm_shiftctrl()
-        .modify(|r, w| unsafe { w.bits(r.bits() & !(0b11 << 16 | 0b11 << 30)) });
+        .modify(|r, w| unsafe { w.bits(r.bits() & !(0b1111 << 14 | 0b11 << 30)) });
 
     // Diagnostic instructions must not apply mandatory side-set to pins.
     registers.sm(0).sm_pinctrl().modify(|_, w| unsafe { w.sideset_count().bits(0) });

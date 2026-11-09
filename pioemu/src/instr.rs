@@ -1,4 +1,4 @@
-use arbitrary_int::{u1, u5};
+use arbitrary_int::{u1, u2, u5};
 use std::fmt;
 
 #[derive(Clone, Copy, Debug)]
@@ -62,6 +62,14 @@ pub enum Instruction {
         if_empty: u1,
         block: u1,
     },
+    MovToRx {
+        index: Option<u2>,
+    },
+    MovFromRx {
+        if_empty: u1,
+        block: u1,
+        index: Option<u2>,
+    },
     Mov {
         destn: mov::Destn,
         op: mov::Op,
@@ -107,11 +115,13 @@ impl Instr {
                 Instruction::Out { destn: [Pins, X, Y, Null, PinDirs, Pc, Isr, Exec][a], bit_count: u5::new(b) }
             }
             4 => {
-                assert!(b & 0x10 == 0, "undefined: {word:04x} needs FJOIN_RX_PUT or FJOIN_RX_GET");
-                if a & 4 == 0 {
-                    Instruction::Push { if_full: bit(1), block: bit(0) }
-                } else {
-                    Instruction::Pull { if_empty: bit(1), block: bit(0) }
+                let index = (b >> 3 & 1 == 1).then(|| u2::new(b & 3));
+                match (b >> 4, a & 4, b & 0x0f) {
+                    (0, 0, _) => Instruction::Push { if_full: bit(1), block: bit(0) },
+                    (0, _, _) => Instruction::Pull { if_empty: bit(1), block: bit(0) },
+                    (_, _, 1..8) => panic!("undefined: {word:04x} indexes the RX FIFO by Y with a nonzero index"),
+                    (_, 0, _) => Instruction::MovToRx { index },
+                    _ => Instruction::MovFromRx { if_empty: bit(1), block: bit(0), index },
                 }
             }
             5 => {
@@ -219,6 +229,14 @@ impl fmt::Display for Instruction {
                 let blk = if block.value() == 0 { " noblock" } else { "" };
                 write!(f, "pull{}{}", ifempty, blk)
             }
+            Instruction::MovToRx { index } => match index {
+                Some(index) => write!(f, "mov rxfifo[{}], isr", index.value()),
+                None => write!(f, "mov rxfifo[y], isr"),
+            },
+            Instruction::MovFromRx { index, .. } => match index {
+                Some(index) => write!(f, "mov osr, rxfifo[{}]", index.value()),
+                None => write!(f, "mov osr, rxfifo[y]"),
+            },
             Instruction::Mov { destn, op, source } => {
                 let dst = match destn {
                     mov::Destn::Pins => "pins",

@@ -43,6 +43,9 @@ Each CSV row is reconstructed independently: row N resets PIO0, reloads the
 program, executes N ticks, captures readable state, then destructively extracts
 X, Y, ISR, and OSR through SM0's RX FIFO. Consequently, collecting N rows executes
 N(N+1)/2 ticks. Existing RX words appear in `rx_count` and `rx0` through `rx3`.
+With FJOIN_RX_PUT or FJOIN_RX_GET set, the RX FIFO is not drained; `rx0` through `rx3`
+are read from RXF0_PUTGET0..3 instead (clearing FJOIN_RX_GET first when both are set),
+and the storage is zeroed through those registers before each run.
 SM0's EXECCTRL, SHIFTCTRL and PINCTRL come from the request, and the request's TX
 words are loaded into SM0's TX FIFO before the first tick. Before that, SM0's X, Y,
 ISR, OSR, both shift counts and the IRQ flags are set from the request with injected

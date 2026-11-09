@@ -263,6 +263,10 @@ impl StateMachine {
                         }
                     }
                     Instruction::Push { if_full, block } => {
+                        assert!(
+                            !self.config.rx_put && !self.config.rx_get,
+                            "undefined: PUSH with FJOIN_RX_PUT or FJOIN_RX_GET"
+                        );
                         let (if_full, block) = (if_full.value() == 1, block.value() == 1);
                         let should_push = !if_full || (self.state.isr_shift_count >= self.config.calc_push_thresh());
                         if should_push {
@@ -300,6 +304,23 @@ impl StateMachine {
                                     self.state.osr_shift_count = 0;
                                 }
                             }
+                        }
+                    }
+                    Instruction::MovToRx { index } => {
+                        assert!(self.config.rx_put, "undefined: mov rxfifo[], isr without FJOIN_RX_PUT");
+                        self.state.rx_putget[index.map_or(self.state.y as usize & 3, |i| i.value() as usize)] = self.state.isr;
+                    }
+                    Instruction::MovFromRx { if_empty, block, index } => {
+                        assert!(self.config.rx_get, "undefined: mov osr, rxfifo[] without FJOIN_RX_GET");
+                        let pull = !(self.config.autopull && self.state.osr_shift_count == 0)
+                            && (if_empty.value() == 0 || self.state.osr_shift_count >= self.config.calc_pull_thresh());
+                        if pull && self.state.tx_fifo.pop_front().is_none() {
+                            self.state.tx_stalled = true;
+                            self.state.stalled = block.value() == 1;
+                        }
+                        if !self.state.stalled {
+                            self.state.osr = self.state.rx_putget[index.map_or(self.state.y as usize & 3, |i| i.value() as usize)];
+                            self.state.osr_shift_count = 0;
                         }
                     }
                     Instruction::Mov { destn, op, source } => {
@@ -422,6 +443,7 @@ pub struct State {
     pub osr_shift_count: u8,
     pub tx_fifo: VecDeque<u32>,
     pub rx_fifo: VecDeque<u32>,
+    pub rx_putget: [u32; 4],
     pub delay_counter: u8,
     pub stalled: bool,
     pub tx_stalled: bool,
@@ -444,6 +466,7 @@ impl State {
             isr_shift_count: 0,
             tx_fifo: VecDeque::new(),
             rx_fifo: VecDeque::new(),
+            rx_putget: [0; 4],
             delay_counter: 0,
             stalled: false,
             tx_stalled: false,
@@ -499,6 +522,8 @@ pub struct Config {
     in_shiftdir: ShiftDir,
     autopull: bool,
     autopush: bool,
+    rx_put: bool,
+    rx_get: bool,
     tx_depth: usize,
     rx_depth: usize,
     // TODO clkdiv?
@@ -512,6 +537,15 @@ impl Config {
     }
     pub fn from_registers(execctrl: u32, shiftctrl: u32, pinctrl: u32) -> Self {
         let field = |register: u32, lsb: u32, bits: u32| ((register >> lsb) & ((1 << bits) - 1)) as u8;
+        assert!(
+            field(shiftctrl, 16, 1) == 0 || field(shiftctrl, 14, 2) == 0,
+            "undefined: autopush with FJOIN_RX_PUT or FJOIN_RX_GET"
+        );
+        let join = if field(shiftctrl, 14, 2) == 0 {
+            field(shiftctrl, 30, 2) as usize
+        } else {
+            0
+        };
         let shift_dir = |bit| {
             if field(shiftctrl, bit, 1) == 1 {
                 ShiftDir::Right
@@ -547,8 +581,10 @@ impl Config {
             in_shiftdir: shift_dir(18),
             autopull: field(shiftctrl, 17, 1) == 1,
             autopush: field(shiftctrl, 16, 1) == 1,
-            tx_depth: [4, 8, 0, 0][field(shiftctrl, 30, 2) as usize],
-            rx_depth: [4, 0, 8, 0][field(shiftctrl, 30, 2) as usize],
+            rx_put: field(shiftctrl, 15, 1) == 1,
+            rx_get: field(shiftctrl, 14, 1) == 1,
+            tx_depth: [4, 8, 0, 0][join],
+            rx_depth: [4, 0, 8, 0][join],
         }
     }
     fn calc_pull_thresh(&self) -> u8 {

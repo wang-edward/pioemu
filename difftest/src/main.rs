@@ -35,7 +35,11 @@ fn run_random(count: u64, seed: u64) -> Result<(), Box<dyn Error>> {
         let rows = hardware.run(&request)?;
         let failure = match std::panic::catch_unwind(|| emulate(&request)) {
             Ok(emulator) => first_difference(&rows, &emulator),
-            Err(payload) => match payload.downcast_ref::<String>() {
+            Err(payload) => match payload
+                .downcast_ref::<String>()
+                .map(String::as_str)
+                .or(payload.downcast_ref::<&str>().copied())
+            {
                 Some(message) if message.starts_with("undefined") => {
                     undefined += 1;
                     None
@@ -169,7 +173,7 @@ fn emulate(request: &Request) -> Vec<String> {
                     | (sm.state.tx_stalled as u32) << (24 + i)
             });
             let (test, marker) = (&block.sms[0].state, &block.sms[1].state);
-            let mut rx = [0u32; 4];
+            let mut rx = test.rx_putget;
             for (destination, word) in rx.iter_mut().zip(test.rx_fifo.iter()) {
                 *destination = *word;
             }
@@ -234,7 +238,10 @@ fn random_word(rng: &mut Rng, origin: u8, len: usize) -> u16 {
         },
         2 => (2, rng.below(8), rng.below(32)),
         3 => (3, rng.below(8), rng.below(32)),
-        4 => (4, rng.below(8), 0),
+        4 => match rng.below(3) {
+            0 => (4, rng.below(8), 0x10 | rng.below(2) * (8 | rng.below(8))),
+            _ => (4, rng.below(8), rng.below(16)),
+        },
         5 => (5, rng.below(8), rng.below(32)),
         6 => (6, rng.below(4), rng.below(32)),
         _ => (7, rng.below(8), rng.below(32)),
@@ -262,7 +269,9 @@ fn random_request(rng: &mut Rng) -> Request {
     let side_count = field(6, 0);
     let side_en = if side_count > 0 { field(2, 30) } else { 0 };
     let execctrl = field(32, 0) | field(4, 5) | field(128, 17) | field(32, 24) | wrap_bottom << 7 | wrap_top << 12 | field(2, 29) | side_en;
-    let shiftctrl = field(32, 0) | field(16, 16) | field(32, 20) | field(32, 25) | field(4, 30);
+    let putget = if field(2, 0) == 0 { field(4, 14) } else { 0 };
+    let autopush = if putget == 0 { field(2, 16) } else { 0 };
+    let shiftctrl = field(32, 0) | putget | autopush | field(8, 17) | field(32, 20) | field(32, 25) | field(4, 30);
     let pinctrl = field(32, 0) | field(32, 5) | field(32, 10) | field(32, 15) | field(33, 20) | field(6, 26) | side_count << 29;
     let mut request = Request {
         ticks: RANDOM_TICKS,
