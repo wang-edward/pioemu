@@ -2,7 +2,7 @@
 
 pub const MAX_WORDS: usize = 30;
 pub const MAX_TICKS: u32 = 1000;
-pub const MAX_REQUEST: usize = 256;
+pub const MAX_REQUEST: usize = 512;
 pub const MAX_TX: usize = 4;
 pub const CSV_HEADER: &str = "ticks_elapsed,test_pc,marker_pc,padout,padoe,irq,flevel,fdebug,rx_count,rx0,rx1,rx2,rx3,x,y,isr,osr";
 
@@ -18,6 +18,13 @@ pub struct Request {
     pub code: [u16; MAX_WORDS],
     pub tx_len: usize,
     pub tx: [u32; MAX_TX],
+    pub x: u32,
+    pub y: u32,
+    pub isr: u32,
+    pub isr_count: u8,
+    pub osr: u32,
+    pub osr_count: u8,
+    pub irq: u8,
 }
 
 impl Request {
@@ -35,6 +42,14 @@ impl Request {
 
     pub fn side_optional(&self) -> bool {
         self.execctrl >> 30 & 1 == 1
+    }
+
+    pub fn in_shift_right(&self) -> bool {
+        self.shiftctrl >> 18 & 1 == 1
+    }
+
+    pub fn out_shift_right(&self) -> bool {
+        self.shiftctrl >> 19 & 1 == 1
     }
 
     pub fn validate(&self) -> Result<(), &'static str> {
@@ -57,6 +72,12 @@ impl Request {
         }
         if self.tx_len > MAX_TX {
             return Err("at most 4 TX words");
+        }
+        if self.isr_count > 32 || self.osr_count > 32 {
+            return Err("shift counts must be 0..32");
+        }
+        if self.osr != osr_reachable(self.osr, self.osr_count, self.out_shift_right()) {
+            return Err("OSR bits already shifted out must be zero");
         }
         Ok(())
     }
@@ -86,10 +107,16 @@ impl Request {
         for word in &mut tx[..tx_len] {
             *word = number(16)?;
         }
+        let (x, y, isr) = (number(16)?, number(16)?, number(16)?);
+        let isr_count = u8::try_from(number(10)?).map_err(|_| "field out of range")?;
+        let osr = number(16)?;
+        let osr_count = u8::try_from(number(10)?).map_err(|_| "field out of range")?;
+        let irq = u8::try_from(number(16)?).map_err(|_| "field out of range")?;
         if fields.next().is_some() {
             return Err("extra fields");
         }
-        let request = Self { ticks, execctrl, shiftctrl, pinctrl, origin, len, code, tx_len, tx };
+        let request =
+            Self { ticks, execctrl, shiftctrl, pinctrl, origin, len, code, tx_len, tx, x, y, isr, isr_count, osr, osr_count, irq };
         request.validate()?;
         Ok(request)
     }
@@ -107,7 +134,19 @@ impl Request {
         for word in &self.tx[..self.tx_len] {
             write!(output, " {word:08x}")?;
         }
-        writeln!(output)
+        writeln!(
+            output,
+            " {:08x} {:08x} {:08x} {} {:08x} {} {:02x}",
+            self.x, self.y, self.isr, self.isr_count, self.osr, self.osr_count, self.irq
+        )
+    }
+}
+
+pub fn osr_reachable(osr: u32, count: u8, shift_right: bool) -> u32 {
+    match (count, shift_right) {
+        (32, _) => 0,
+        (count, true) => osr & u32::MAX >> count,
+        (count, false) => osr & u32::MAX << count,
     }
 }
 
@@ -154,7 +193,8 @@ mod tests {
     use std::string::String;
     #[test]
     fn framing_and_recovery() {
-        let line = b"RUN2 16 00002000 000c0000 14000000 0 3 e023 0241 80a0 2 12345678 9abcdef0\r\n";
+        let line =
+            b"RUN2 16 00002000 000c0000 14000000 0 3 e023 0241 80a0 2 12345678 9abcdef0 00000001 00000002 00000003 4 00000005 6 ff\r\n";
         let mut decoder = Decoder::default();
         for _ in 0..300 {
             assert!(decoder.push(b'x').is_none());
@@ -169,11 +209,12 @@ mod tests {
             assert_eq!((request.wrap_bottom(), request.wrap_top()), (0, 2));
             assert_eq!(&request.code[..3], &[0xe023, 0x0241, 0x80a0]);
             assert_eq!(&request.tx[..request.tx_len], &[0x1234_5678, 0x9abc_def0]);
+            assert_eq!((request.isr, request.isr_count, request.osr_count, request.irq), (3, 4, 6, 0xff));
         }
     }
     #[test]
     fn round_trip() {
-        let line = "RUN2 7 40006200 000f0000 40000000 4 3 f823 0245 80a0 1 deadbeef\n";
+        let line = "RUN2 7 40006200 000f0000 40000000 4 3 f823 0245 80a0 1 deadbeef 00000000 ffffffff 80000000 32 00000000 32 00\n";
         let mut wire = String::new();
         Request::parse(line).unwrap().write(&mut wire).unwrap();
         assert_eq!(wire, line);
@@ -181,15 +222,18 @@ mod tests {
     #[test]
     fn invalid_requests() {
         for line in [
-            "RUN2 0 00000000 000c0000 14000000 0 1 e023 0",
-            "RUN2 1001 00000000 000c0000 14000000 0 1 e023 0",
-            "RUN2 1 0001e000 000c0000 14000000 0 1 e023 0",
-            "RUN2 1 00000000 000c0000 c0000000 0 1 e023 0",
-            "RUN2 1 40000000 000c0000 14000000 0 1 e023 0",
-            "RUN2 1 00000000 000c0000 14000000 0 1 001e 0",
-            "RUN2 1 00000000 000c0000 14000000 0 2 e023 0",
-            "RUN2 1 00000000 000c0000 14000000 0 1 e023 5 1 2 3 4 5",
-            "RUN2 1 00000000 000c0000 14000000 0 1 e023 0 extra",
+            "RUN2 0 00000000 000c0000 14000000 0 1 e023 0 0 0 0 0 0 32 0",
+            "RUN2 1001 00000000 000c0000 14000000 0 1 e023 0 0 0 0 0 0 32 0",
+            "RUN2 1 0001e000 000c0000 14000000 0 1 e023 0 0 0 0 0 0 32 0",
+            "RUN2 1 00000000 000c0000 c0000000 0 1 e023 0 0 0 0 0 0 32 0",
+            "RUN2 1 40000000 000c0000 14000000 0 1 e023 0 0 0 0 0 0 32 0",
+            "RUN2 1 00000000 000c0000 14000000 0 1 001e 0 0 0 0 0 0 32 0",
+            "RUN2 1 00000000 000c0000 14000000 0 2 e023 0 0 0 0 0 0 32 0",
+            "RUN2 1 00000000 000c0000 14000000 0 1 e023 5 1 2 3 4 5 0 0 0 0 0 32 0",
+            "RUN2 1 00000000 000c0000 14000000 0 1 e023 0 0 0 0 0 0 32 0 extra",
+            "RUN2 1 00000000 000c0000 14000000 0 1 e023 0 0 0 0 33 0 32 0",
+            "RUN2 1 00000000 000c0000 14000000 0 1 e023 0 0 0 0 0 80000000 1 0",
+            "RUN2 1 00000000 00040000 14000000 0 1 e023 0 0 0 0 0 00000001 1 0",
             "RUN1 1 0 0 0 0 0 1 e023",
         ] {
             assert!(Request::parse(line).is_err(), "{line}");

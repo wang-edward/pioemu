@@ -38,17 +38,21 @@ program, executes N ticks, captures readable state, then destructively extracts
 X, Y, ISR, and OSR through SM0's RX FIFO. Consequently, collecting N rows executes
 N(N+1)/2 ticks. Existing RX words appear in `rx_count` and `rx0` through `rx3`.
 SM0's EXECCTRL, SHIFTCTRL and PINCTRL come from the request, and the request's TX
-words are loaded into SM0's TX FIFO before the first tick. No external pin stimulus
+words are loaded into SM0's TX FIFO before the first tick. Before that, SM0's X, Y,
+ISR, OSR, both shift counts and the IRQ flags are set from the request with injected
+instructions at full speed (autopush/autopull off, then SHIFTCTRL is restored). An
+OSR shift count can only follow shifting, so bits it has shifted out must be zero.
+No external pin stimulus
 is supplied, physical GPIO routing is not configured, and replays assume repeatable
 external inputs.
 
 The shared `protocol` crate defines the newline-delimited request:
 
 ```text
-RUN2 ticks execctrl shiftctrl pinctrl origin word_count hex_words... tx_count hex_tx_words...\n
+RUN2 ticks execctrl shiftctrl pinctrl origin word_count hex_words... tx_count hex_tx_words... x y isr isr_count osr osr_count irq\n
 ```
 
-Counts, ticks and the origin are decimal; registers and words are hexadecimal.
+Counts, ticks and the origin are decimal; registers, words and IRQ flags are hexadecimal.
 Wrap and side-set come from EXECCTRL and PINCTRL. Addresses, including JMP targets,
 are absolute. The firmware accepts requests split across USB packets. It responds
 with the CSV header, the requested rows, and `DONE`, or an `ERR message` line, and
