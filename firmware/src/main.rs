@@ -83,7 +83,14 @@ fn main() -> ! {
     let mut receive_buffer = [0u8; 64];
 
     loop {
-        if !usb.poll(&mut [&mut serial]) {
+        let polled = usb.poll(&mut [&mut serial]);
+        if serial.line_coding().data_rate() == 1200 {
+            hal::reboot::reboot(
+                hal::reboot::RebootKind::BootSel { picoboot_disabled: false, msd_disabled: false },
+                hal::reboot::RebootArch::Normal,
+            );
+        }
+        if !polled {
             continue;
         }
 

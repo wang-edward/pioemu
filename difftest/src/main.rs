@@ -16,9 +16,14 @@ const MARKER_EXECCTRL: u32 = (MAX_WORDS as u32) << 7 | (MAX_WORDS as u32 + 1) <<
 fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
+        ["bootsel"] => {
+            drop(open_port(1200)?);
+            std::thread::sleep(Duration::from_secs(3));
+            Ok(())
+        }
         [count] => run_random(count.parse()?, SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos() as u64),
         [count, seed] => run_random(count.parse()?, seed.parse()?),
-        _ => Err("usage: difftest <count> [seed]".into()),
+        _ => Err("usage: difftest <count> [seed] | difftest bootsel".into()),
     }
 }
 
@@ -54,23 +59,27 @@ struct Hardware {
     reader: BufReader<Box<dyn SerialPort>>,
 }
 
+fn open_port(baud_rate: u32) -> Result<Box<dyn SerialPort>, Box<dyn Error>> {
+    let ports: Vec<_> = serialport::available_ports()?
+        .into_iter()
+        // macOS lists both /dev/cu.* and /dev/tty.* for each device. Use the callout port so one Pico is counted only once.
+        .filter(|port| !cfg!(target_os = "macos") || port.port_name.starts_with("/dev/cu."))
+        .filter(|port| {
+            matches!(&port.port_type, SerialPortType::UsbPort(info)
+            if info.vid == 0x1209 && info.pid == 0x2350)
+        })
+        .collect();
+    let port = match ports.as_slice() {
+        [port] => port,
+        [] => return Err("No pioemu USB device found; connect a Pico 2 running the firmware".into()),
+        _ => return Err("More than one pioemu device found; connect only one".into()),
+    };
+    Ok(serialport::new(&port.port_name, baud_rate).timeout(Duration::from_secs(5)).open()?)
+}
+
 impl Hardware {
     fn open() -> Result<Self, Box<dyn Error>> {
-        let ports: Vec<_> = serialport::available_ports()?
-            .into_iter()
-            // macOS lists both /dev/cu.* and /dev/tty.* for each device. Use the callout port so one Pico is counted only once.
-            .filter(|port| !cfg!(target_os = "macos") || port.port_name.starts_with("/dev/cu."))
-            .filter(|port| {
-                matches!(&port.port_type, SerialPortType::UsbPort(info)
-            if info.vid == 0x1209 && info.pid == 0x2350)
-            })
-            .collect();
-        let port = match ports.as_slice() {
-            [port] => port,
-            [] => return Err("No pioemu USB device found; connect a Pico 2 running the firmware".into()),
-            _ => return Err("More than one pioemu device found; connect only one".into()),
-        };
-        let mut serial = serialport::new(&port.port_name, 115_200).timeout(Duration::from_secs(5)).open()?;
+        let mut serial = open_port(115_200)?;
         serial.write_data_terminal_ready(true)?;
         Ok(Self { reader: BufReader::new(serial) })
     }

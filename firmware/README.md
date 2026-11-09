@@ -15,6 +15,12 @@ Flash over the Pico 2 USB bootloader:
 cargo run --release
 ```
 
+To reflash a running firmware without holding BOOTSEL, reboot it into the bootloader first
+(opening the port at 1200 baud triggers the ROM reboot):
+```sh
+cargo run -q -p difftest -- bootsel && cd firmware && cargo run --release
+```
+
 The firmware enumerates as a USB CDC serial device named `PIO tick prototype`.
 After flashing, run the PC example from the repository root:
 
