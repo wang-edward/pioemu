@@ -83,7 +83,6 @@ pub struct Instr {
     pub instruction: Instruction,
     pub delay: u5,
     pub side_set: Option<u5>,
-    // TODO something about delay and side_set sharing bits
 }
 
 impl Instr {

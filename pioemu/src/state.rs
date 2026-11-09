@@ -164,7 +164,7 @@ impl StateMachine {
                             }
                             Condition::XNeqY => self.state.x != self.state.y,
                             Condition::Pin => (gpio_in >> self.config.jmp_pin.value()) & 1 == 1,
-                            Condition::OsrNotEmpty => self.state.osr_shift_count < self.config.calc_pull_thresh(), // TODO
+                            Condition::OsrNotEmpty => self.state.osr_shift_count < self.config.calc_pull_thresh(),
                         };
                         if jump {
                             self.state.pc = address;
@@ -488,7 +488,6 @@ pub struct Config {
     jmp_pin: u5,
     out_enable_bit: Option<u8>,
     out_sticky: bool,
-    // out_en_sel: u5,
     wrap_top: u5,
     wrap_bottom: u5,
     status: Status,
@@ -508,7 +507,6 @@ pub struct Config {
 }
 
 impl Config {
-    // TODO pull_thresh override 32 = 0 and fifo_depth if fjoin
     fn new() -> Self {
         Self::from_registers(0x0001_f000, 0x000c_0000, 0x1400_0000)
     }
