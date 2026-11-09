@@ -148,6 +148,17 @@ pub fn sat_shr(x: u32, n: u8) -> u32 {
 impl StateMachine {
     // TODO function for gpio in / out mapping
     fn execute(&mut self, instr: &Instr, gpio_out: &mut u32, gpio_dir: &mut u32, gpio_in: u32, irq_flags: &mut u8, sm_id: u8) {
+        let threshold = self.config.calc_pull_thresh();
+        let was_empty = self.state.osr_shift_count >= threshold;
+        self.execute_instr(instr, gpio_out, gpio_dir, gpio_in, irq_flags, sm_id);
+        let count = self.state.osr_shift_count;
+        if self.config.autopull && (was_empty && count >= threshold || count == threshold) && !self.state.tx_fifo.is_empty() {
+            self.state.osr = self.state.tx_fifo.pop().expect("tx fifo empty when it shouldn't be");
+            self.state.osr_shift_count = 0;
+        }
+    }
+
+    fn execute_instr(&mut self, instr: &Instr, gpio_out: &mut u32, gpio_dir: &mut u32, gpio_in: u32, irq_flags: &mut u8, sm_id: u8) {
         if let Some(irq_index) = self.state.irq_wait {
             if !bit_at(*irq_flags, irq_index) {
                 self.state.irq_wait = None;
@@ -241,13 +252,8 @@ impl StateMachine {
             Instruction::Out { destn, bit_count } => {
                 let bit_count = if bit_count.value() == 0 { 32 } else { bit_count.value() };
                 if self.config.autopull && self.state.osr_shift_count >= self.config.calc_pull_thresh() {
-                    if self.state.tx_fifo.is_empty() {
-                        self.state.stalled = true;
-                        return;
-                    }
-                    // todo ? here?
-                    self.state.osr = self.state.tx_fifo.pop().expect("tx fifo empty when it shouldn't be");
-                    self.state.osr_shift_count = 0;
+                    self.state.stalled = true;
+                    return;
                 }
 
                 let data = match self.config.out_shiftdir {
@@ -283,13 +289,7 @@ impl StateMachine {
                     shift::Destn::Exec => panic!(), // todo EXEC destn. i think we need to have bit decoding for this to work
                 }
 
-                self.state.osr_shift_count = cmp::min(63, self.state.osr_shift_count + bit_count);
-                if self.config.autopull && self.state.osr_shift_count >= self.config.calc_pull_thresh() {
-                    if !self.state.tx_fifo.is_empty() {
-                        self.state.osr = self.state.tx_fifo.pop().expect("tx fifo empty when it shouldn't be");
-                        self.state.osr_shift_count = 0;
-                    }
-                }
+                self.state.osr_shift_count = cmp::min(32, self.state.osr_shift_count + bit_count);
             }
             Instruction::Push { if_full, block } => {
                 let (if_full, block) = (if_full.value() == 1, block.value() == 1);
@@ -308,10 +308,10 @@ impl StateMachine {
                 }
             }
             Instruction::Pull { if_empty, block } => {
-                // TODO autopull noop and stuff
                 // TODO program checker (don't use mov dst, osr when autopull on and more)
                 let (if_empty, block) = (if_empty.value() == 1, block.value() == 1);
-                let should_pull = !if_empty | (self.state.osr_shift_count >= self.config.calc_pull_thresh());
+                let should_pull = !(self.config.autopull && self.state.osr_shift_count == 0)
+                    && (!if_empty || self.state.osr_shift_count >= self.config.calc_pull_thresh());
                 if should_pull {
                     if self.state.tx_fifo.is_empty() {
                         if block {
@@ -409,15 +409,6 @@ impl StateMachine {
                 }
                 _ => panic!(),
             },
-        }
-
-        if !matches!(instr.instruction, Instruction::Out { .. }) {
-            if self.config.autopull && self.state.osr_shift_count >= self.config.calc_pull_thresh() {
-                if !self.state.tx_fifo.is_empty() {
-                    self.state.osr = self.state.tx_fifo.pop().expect("tx fifo empty when it shouldn't be");
-                    self.state.osr_shift_count = 0;
-                }
-            }
         }
 
         self.state.delay_counter = instr.delay.value();
