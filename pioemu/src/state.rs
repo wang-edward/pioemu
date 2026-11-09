@@ -220,20 +220,22 @@ impl StateMachine {
                     shift::Source::Osr => self.state.osr,
                     _ => panic!(),
                 } & to_mask(bit_count);
-                match self.config.in_shiftdir {
-                    ShiftDir::Left => self.state.isr = sat_shl(self.state.isr, bit_count) | data,
-                    ShiftDir::Right => self.state.isr = sat_shr(self.state.isr, bit_count) | wrap_shiftr(data, bit_count),
-                }
-                self.state.isr_shift_count = cmp::min(63, self.state.isr_shift_count + bit_count);
-                // TODO handle autopush: If automatic push is enabled, IN will also push the ISR contents to the RX FIFO if the push threshold is reached (SHIFTCTRL_PUSH_THRESH). IN still executes in one cycle, whether an automatic push takes place or not. The state machine will stall if the RX FIFO is full when an automatic push occurs. An automatic push clears the ISR contents to all-zeroes, and clears the input shift count. See Section 3.5.4 }
-                if self.config.autopush && self.state.isr_shift_count >= self.config.calc_push_thresh() {
+                let isr = match self.config.in_shiftdir {
+                    ShiftDir::Left => sat_shl(self.state.isr, bit_count) | data,
+                    ShiftDir::Right => sat_shr(self.state.isr, bit_count) | wrap_shiftr(data, bit_count),
+                };
+                let isr_shift_count = cmp::min(63, self.state.isr_shift_count + bit_count);
+                if self.config.autopush && isr_shift_count >= self.config.calc_push_thresh() {
                     if self.state.rx_fifo.is_full() {
                         self.state.stalled = true;
                         return;
                     }
-                    self.state.rx_fifo.push(self.state.isr);
+                    self.state.rx_fifo.push(isr);
                     self.state.isr = 0;
                     self.state.isr_shift_count = 0;
+                } else {
+                    self.state.isr = isr;
+                    self.state.isr_shift_count = isr_shift_count;
                 }
             }
             Instruction::Out { destn, bit_count } => {
