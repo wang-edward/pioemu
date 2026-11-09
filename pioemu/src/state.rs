@@ -158,6 +158,14 @@ impl StateMachine {
         }
     }
 
+    fn side_set(&self, instr: &Instr, gpio_out: &mut u32, gpio_dir: &mut u32) {
+        if let Some(value) = instr.side_set {
+            let pins = if self.config.side_pindir { gpio_dir } else { gpio_out };
+            let count = self.config.sideset_count.get() - self.config.sideset_en as u8;
+            write_pins(pins, value.value() as u32, self.config.sideset_base.get(), count);
+        }
+    }
+
     fn execute_instr(&mut self, instr: &Instr, gpio_out: &mut u32, gpio_dir: &mut u32, gpio_in: u32, irq_flags: &mut u8, sm_id: u8) {
         if let Some(irq_index) = self.state.irq_wait {
             if !bit_at(*irq_flags, irq_index) {
@@ -173,6 +181,7 @@ impl StateMachine {
 
         let mut advance_pc = true;
         self.state.stalled = false;
+        self.side_set(instr, gpio_out, gpio_dir);
 
         match instr.instruction {
             Instruction::Jmp { condition, address } => {
@@ -411,13 +420,8 @@ impl StateMachine {
             },
         }
 
+        self.side_set(instr, gpio_out, gpio_dir);
         self.state.delay_counter = instr.delay.value();
-        // TODO side set
-        // should be something like switch self.config.sideset_count == 5 vs 0
-        // also side_en controls whether to use MSB as enable
-        // If an instruction stalls, the side-set still takes effect immediately.
-        // - so maybe put this at the top
-        // and takes priority over OUT writing to the same pin
         if advance_pc {
             if self.state.pc == self.config.wrap_top {
                 self.state.pc = self.config.wrap_bottom;

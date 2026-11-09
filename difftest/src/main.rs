@@ -214,7 +214,7 @@ fn random_word(rng: &mut Rng, origin: u8, len: usize) -> u16 {
         6 => (6, rng.below(4), rng.pick(&[0, 2]) << 3 | rng.below(8)),
         _ => (7, rng.pick(&[0, 1, 2, 4]), rng.below(32)),
     };
-    let delay = if rng.below(4) == 0 { rng.below(32) } else { 0 };
+    let delay = if rng.below(2) == 0 { rng.below(32) } else { 0 };
     opcode << 13 | delay << 8 | a << 5 | b
 }
 
@@ -233,9 +233,11 @@ fn random_request(rng: &mut Rng) -> Request {
     let wrap_top = origin as u32 + rng.below(len as u64) as u32;
     let wrap_bottom = origin as u32 + rng.below(wrap_top as u64 - origin as u64 + 1) as u32;
     let mut field = |values: u64, lsb: u32| (rng.below(values) as u32) << lsb;
-    let execctrl = field(32, 0) | field(2, 5) | wrap_bottom << 7 | wrap_top << 12;
+    let side_count = field(6, 0);
+    let side_en = if side_count > 0 { field(2, 30) } else { 0 };
+    let execctrl = field(32, 0) | field(2, 5) | wrap_bottom << 7 | wrap_top << 12 | field(2, 29) | side_en;
     let shiftctrl = field(16, 16) | field(32, 20) | field(32, 25);
-    let pinctrl = field(32, 0) | field(32, 5) | field(32, 15) | field(33, 20) | field(6, 26);
+    let pinctrl = field(32, 0) | field(32, 5) | field(32, 10) | field(32, 15) | field(33, 20) | field(6, 26) | side_count << 29;
     let mut request = Request {
         ticks: RANDOM_TICKS,
         execctrl,
