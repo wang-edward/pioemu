@@ -130,11 +130,11 @@ pub fn bit_at(x: u8, index: u8) -> bool {
     ((x >> index) & 0x1) == 1
 }
 
-pub fn calc_irq_index(index: u8, sm_id: u8) -> u8 {
-    if index & 0x10 != 0 {
-        (index & 0x04) | ((index + sm_id) & 0x03)
-    } else {
-        index & 0x07
+pub fn calc_irq_index(index: u8, sm_id: u8) -> Option<u8> {
+    match index >> 3 & 3 {
+        0 => Some(index & 7),
+        2 => Some((index & 4) | ((index + sm_id) & 3)),
+        _ => None,
     }
 }
 
@@ -165,6 +165,13 @@ impl StateMachine {
                 let mut advance_pc = true;
                 let exec = self.state.exec.take();
                 self.state.stalled = false;
+                let status = match self.config.status {
+                    Status::TxLevel(n) => self.state.tx_fifo.len() < n as usize,
+                    Status::RxLevel(n) => self.state.rx_fifo.len() < n as usize,
+                    Status::Irq(n) => n < 8 && bit_at(*irq_flags, n),
+                    Status::Reserved => false,
+                };
+                let status = if status { u32::MAX } else { 0 };
                 match instr.instruction {
                     Instruction::Jmp { condition, address } => {
                         let jump = match condition {
@@ -193,18 +200,16 @@ impl StateMachine {
                     Instruction::Wait { polarity, source, index } => {
                         let (polarity, index) = (polarity.value() as u32, index.value() as u32);
                         let irq_index = calc_irq_index(index as u8, sm_id);
+                        let pins = wrap_shiftr(gpio_in, self.config.in_base.get()) & to_mask(self.config.in_count.get());
                         let cond_met = match source {
                             wait::Source::Gpio => (gpio_in >> index) & 1,
-                            wait::Source::Pin => (wrap_shiftr(gpio_in, self.config.in_base.get()) >> index) & 1,
-                            wait::Source::Irq => {
-                                assert!(index <= 7);
-                                (*irq_flags as u32 >> irq_index) & 1
-                            }
-                            _ => panic!(),
-                        } == polarity; // convert to bool / negate
+                            wait::Source::Pin => (pins >> index) & 1,
+                            wait::Source::Irq => irq_index.map_or(0, |i| (*irq_flags as u32 >> i) & 1),
+                            wait::Source::JmpPin => (gpio_in >> ((self.config.jmp_pin.value() as u32 + index) % 32)) & 1,
+                        } == polarity;
                         if cond_met {
-                            if matches!(source, wait::Source::Irq) && polarity == 1 {
-                                *irq_flags &= !(1 << irq_index); // If Polarity is 1, the selected IRQ flag is cleared by the state machine upon the wait condition being met.
+                            if let (wait::Source::Irq, 1, Some(i)) = (source, polarity, irq_index) {
+                                *irq_flags &= !(1 << i);
                             }
                         } else {
                             self.state.stalled = true;
@@ -213,13 +218,13 @@ impl StateMachine {
                     Instruction::In { source, bit_count } => {
                         let bit_count = if bit_count.value() == 0 { 32 } else { bit_count.value() };
                         let data = match source {
-                            shift::Source::Pins => wrap_shiftr(gpio_in, self.config.in_base.get()),
+                            shift::Source::Pins => wrap_shiftr(gpio_in, self.config.in_base.get()) & to_mask(self.config.in_count.get()),
                             shift::Source::X => self.state.x,
                             shift::Source::Y => self.state.y,
                             shift::Source::Null => 0,
+                            shift::Source::Reserved1 | shift::Source::Reserved2 => status,
                             shift::Source::Isr => self.state.isr,
                             shift::Source::Osr => self.state.osr,
-                            _ => panic!(),
                         } & to_mask(bit_count);
                         let isr = match self.config.in_shiftdir {
                             ShiftDir::Left => sat_shl(self.state.isr, bit_count) | data,
@@ -311,30 +316,19 @@ impl StateMachine {
                     }
                     Instruction::Mov { destn, op, source } => {
                         let data = match source {
-                            mov::Source::Pins => wrap_shiftr(gpio_in, self.config.in_base.get()),
+                            mov::Source::Pins => wrap_shiftr(gpio_in, self.config.in_base.get()) & to_mask(self.config.in_count.get()),
                             mov::Source::X => self.state.x,
                             mov::Source::Y => self.state.y,
                             mov::Source::Null => 0,
-                            mov::Source::Status => {
-                                let level = match self.config.status_sel {
-                                    StatusSel::TxLevel => self.state.tx_fifo.len(),
-                                    StatusSel::RxLevel => self.state.rx_fifo.len(),
-                                };
-                                if level < self.config.status_n.get() as usize {
-                                    0xffff_ffff
-                                } else {
-                                    0x0
-                                }
-                            }
+                            mov::Source::Reserved | mov::Source::Status => status,
                             mov::Source::Isr => self.state.isr,
                             mov::Source::Osr => self.state.osr,
-                            _ => panic!(),
                         };
                         let data = match op {
                             mov::Op::None => data,
                             mov::Op::Invert => !data,
                             mov::Op::BitReverse => reverse(data),
-                            _ => panic!(),
+                            mov::Op::Reserved => !reverse(data),
                         };
                         match destn {
                             mov::Destn::Pins => {
@@ -360,17 +354,16 @@ impl StateMachine {
                             }
                         }
                     }
-                    Instruction::Irq { clear, wait, index } => {
-                        let irq_index = calc_irq_index(index.value(), sm_id);
-                        if clear.value() == 1 {
-                            *irq_flags &= !(1 << irq_index);
-                        } else {
-                            *irq_flags |= 1 << irq_index;
-                            if wait.value() == 1 {
-                                self.state.irq_wait = Some(irq_index);
+                    Instruction::Irq { clear, wait, index } => match (calc_irq_index(index.value(), sm_id), clear.value(), wait.value()) {
+                        (None, _, _) => (),
+                        (Some(i), 1, _) => *irq_flags &= !(1 << i),
+                        (Some(i), _, wait) => {
+                            *irq_flags |= 1 << i;
+                            if wait == 1 {
+                                self.state.irq_wait = Some(i);
                             }
                         }
-                    }
+                    },
                     Instruction::Set { destn, data } => match destn {
                         set::Destn::Pins => {
                             write_pins(
@@ -394,7 +387,7 @@ impl StateMachine {
                                 self.config.set_count.get(),
                             );
                         }
-                        _ => panic!(),
+                        set::Destn::Reserved1 | set::Destn::Reserved2 | set::Destn::Reserved3 | set::Destn::Reserved4 => (),
                     },
                 }
 
@@ -470,9 +463,11 @@ enum ShiftDir {
 }
 
 #[derive(Debug)]
-enum StatusSel {
-    TxLevel,
-    RxLevel,
+enum Status {
+    TxLevel(u8),
+    RxLevel(u8),
+    Irq(u8),
+    Reserved,
 }
 
 #[derive(Debug)]
@@ -483,6 +478,7 @@ pub struct Config {
     set_base: PinRange,
     set_count: Range<0, 5>,
     in_base: PinRange,
+    in_count: Range<1, 32>,
     sideset_base: PinRange,
     sideset_count: Range<0, 5>,
 
@@ -493,8 +489,7 @@ pub struct Config {
     // out_en_sel: u5,
     wrap_top: u5,
     wrap_bottom: u5,
-    status_sel: StatusSel,
-    status_n: Range<0, 15>,
+    status: Status,
 
     // shiftctrl
     pull_thresh: Range<0, 31>,
@@ -530,6 +525,7 @@ impl Config {
             set_base: Range::new(field(pinctrl, 5, 5)),
             set_count: Range::new(field(pinctrl, 26, 3)),
             in_base: Range::new(field(pinctrl, 15, 5)),
+            in_count: Range::new(if field(shiftctrl, 0, 5) == 0 { 32 } else { field(shiftctrl, 0, 5) }),
             sideset_base: Range::new(field(pinctrl, 10, 5)),
             sideset_count: Range::new(field(pinctrl, 29, 3)),
             sideset_en: field(execctrl, 30, 1) == 1,
@@ -537,12 +533,12 @@ impl Config {
             jmp_pin: u5::new(field(execctrl, 24, 5)),
             wrap_top: u5::new(field(execctrl, 12, 5)),
             wrap_bottom: u5::new(field(execctrl, 7, 5)),
-            status_sel: match field(execctrl, 5, 2) {
-                0 => StatusSel::TxLevel,
-                1 => StatusSel::RxLevel,
-                _ => panic!(),
+            status: match field(execctrl, 5, 2) {
+                0 => Status::TxLevel(field(execctrl, 0, 4)),
+                1 => Status::RxLevel(field(execctrl, 0, 4)),
+                2 => Status::Irq(field(execctrl, 0, 5)),
+                _ => Status::Reserved,
             },
-            status_n: Range::new(field(execctrl, 0, 4)),
             pull_thresh: Range::new(field(shiftctrl, 25, 5)),
             push_thresh: Range::new(field(shiftctrl, 20, 5)),
             out_shiftdir: shift_dir(19),

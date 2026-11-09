@@ -8,7 +8,7 @@ pub enum Condition { Always, XZero, XDec, YZero, YDec, XNeqY, Pin, OsrNotEmpty }
 #[rustfmt::skip]
 pub mod wait {
     #[derive(Clone, Copy, Debug)]
-    pub enum Source { Gpio, Pin, Irq, Reserved }
+    pub enum Source { Gpio, Pin, Irq, JmpPin }
 }
 
 #[rustfmt::skip]
@@ -97,7 +97,7 @@ impl Instr {
             }
             1 => {
                 use wait::Source::*;
-                Instruction::Wait { polarity: bit(2), source: [Gpio, Pin, Irq, Reserved][a & 3], index: u5::new(b) }
+                Instruction::Wait { polarity: bit(2), source: [Gpio, Pin, Irq, JmpPin][a & 3], index: u5::new(b) }
             }
             2 => {
                 use shift::Source::*;
@@ -108,7 +108,7 @@ impl Instr {
                 Instruction::Out { destn: [Pins, X, Y, Null, PinDirs, Pc, Isr, Exec][a], bit_count: u5::new(b) }
             }
             4 => {
-                assert!(b == 0, "unsupported PUSH/PULL encoding {word:04x}");
+                assert!(b & 0x10 == 0, "undefined: {word:04x} needs FJOIN_RX_PUT or FJOIN_RX_GET");
                 if a & 4 == 0 {
                     Instruction::Push { if_full: bit(1), block: bit(0) }
                 } else {
@@ -179,7 +179,7 @@ impl fmt::Display for Instruction {
                     wait::Source::Gpio => "gpio",
                     wait::Source::Pin => "pin",
                     wait::Source::Irq => "irq",
-                    wait::Source::Reserved => "???",
+                    wait::Source::JmpPin => "jmppin",
                 };
                 write!(f, "wait {} {} {}", polarity.value(), src, index.value())
             }

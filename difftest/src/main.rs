@@ -25,20 +25,29 @@ fn main() -> Result<(), Box<dyn Error>> {
 
 fn run_random(count: u64, seed: u64) -> Result<(), Box<dyn Error>> {
     let mut hardware = Hardware::open()?;
-    let mut failed = 0;
+    let (mut failed, mut undefined) = (0, 0);
     for program_seed in seed..seed + count {
         let request = random_request(&mut Rng(program_seed));
         let rows = hardware.run(&request)?;
         let failure = match std::panic::catch_unwind(|| emulate(&request)) {
             Ok(emulator) => first_difference(&rows, &emulator),
-            Err(_) => Some("Emulator panicked\n".to_owned()),
+            Err(payload) => match payload.downcast_ref::<String>() {
+                Some(message) if message.starts_with("undefined") => {
+                    undefined += 1;
+                    None
+                }
+                _ => Some("Emulator panicked\n".to_owned()),
+            },
         };
         if let Some(failure) = failure {
             failed += 1;
             println!("seed {program_seed}:\n{}{failure}", disassemble(&request));
         }
     }
-    println!("{} of {count} programs matched", count - failed);
+    println!(
+        "{} of {count} programs matched, {undefined} hit undefined behaviour",
+        count - failed - undefined
+    );
     if failed == 0 { Ok(()) } else { Err("Emulator mismatch".into()) }
 }
 
@@ -197,22 +206,21 @@ impl Rng {
     }
     fn below(&mut self, n: u64) -> u16 {
         (self.next() % n) as u16
-    }
-    fn pick(&mut self, values: &[u16]) -> u16 {
-        values[self.below(values.len() as u64) as usize]
-    }
-}
+    }}
 
 fn random_word(rng: &mut Rng, origin: u8, len: usize) -> u16 {
     let (opcode, a, b) = match rng.below(9) {
-        0 => (0, rng.pick(&[0, 1, 2, 3, 4, 5, 7]), origin as u16 + rng.below(len as u64)),
-        1 => (1, rng.below(2) << 2 | 2, rng.below(8)),
-        2 => (2, rng.pick(&[1, 2, 3, 6, 7]), rng.below(32)),
+        0 => (0, rng.below(8), origin as u16 + rng.below(len as u64)),
+        1 => match rng.below(4) {
+            3 => (1, rng.below(2) << 2 | 3, rng.below(4)),
+            source => (1, rng.below(2) << 2 | source, rng.below(32)),
+        },
+        2 => (2, rng.below(8), rng.below(32)),
         3 => (3, rng.below(8), rng.below(32)),
         4 => (4, rng.below(8), 0),
-        5 => (5, rng.below(8), rng.below(3) << 3 | rng.pick(&[1, 2, 3, 5, 6, 7])),
-        6 => (6, rng.below(4), rng.pick(&[0, 2]) << 3 | rng.below(8)),
-        _ => (7, rng.pick(&[0, 1, 2, 4]), rng.below(32)),
+        5 => (5, rng.below(8), rng.below(32)),
+        6 => (6, rng.below(4), rng.below(32)),
+        _ => (7, rng.below(8), rng.below(32)),
     };
     let delay = if rng.below(2) == 0 { rng.below(32) } else { 0 };
     opcode << 13 | delay << 8 | a << 5 | b
@@ -236,8 +244,8 @@ fn random_request(rng: &mut Rng) -> Request {
     let mut field = |values: u64, lsb: u32| (rng.below(values) as u32) << lsb;
     let side_count = field(6, 0);
     let side_en = if side_count > 0 { field(2, 30) } else { 0 };
-    let execctrl = field(32, 0) | field(2, 5) | wrap_bottom << 7 | wrap_top << 12 | field(2, 29) | side_en;
-    let shiftctrl = field(16, 16) | field(32, 20) | field(32, 25);
+    let execctrl = field(32, 0) | field(4, 5) | field(32, 24) | wrap_bottom << 7 | wrap_top << 12 | field(2, 29) | side_en;
+    let shiftctrl = field(32, 0) | field(16, 16) | field(32, 20) | field(32, 25);
     let pinctrl = field(32, 0) | field(32, 5) | field(32, 10) | field(32, 15) | field(33, 20) | field(6, 26) | side_count << 29;
     let mut request = Request {
         ticks: RANDOM_TICKS,
