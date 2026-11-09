@@ -4,14 +4,15 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use arbitrary_int::u5;
 use pioemu::instr::Instr;
-use pioemu::state::Block;
-use pioemu_protocol::{CSV_HEADER, MAX_WORDS, Request};
+use pioemu::state::{Block, Config};
+use pioemu_protocol::{CSV_HEADER, MAX_TX, MAX_WORDS, Request};
 use serialport::{SerialPort, SerialPortType};
 
 const RANDOM_TICKS: u32 = 32;
 const RANDOM_MAX_LEN: u64 = 8;
 const MARKER_NOP: u16 = 0xa042;
-const UNCOMPARED: [&str; 2] = ["stalled", "fdebug"];
+const MARKER_EXECCTRL: u32 = (MAX_WORDS as u32) << 7 | (MAX_WORDS as u32 + 1) << 12;
+const UNCOMPARED: [&str; 1] = ["fdebug"];
 
 fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -99,7 +100,7 @@ impl Hardware {
             } else {
                 let tick = rows.len() as u32 + 1;
                 if tick > request.ticks
-                    || response.split(',').count() != 18
+                    || response.split(',').count() != CSV_HEADER.split(',').count()
                     || response.split(',').next().and_then(|tick| tick.parse::<u32>().ok()) != Some(tick)
                 {
                     return Err(format!("Invalid trace row: {response}").into());
@@ -116,13 +117,16 @@ fn emulate(request: &Request) -> Vec<String> {
     words[MAX_WORDS..].fill(MARKER_NOP);
     let mut block = Block::new();
     for (instr, word) in block.instr_mem.iter_mut().zip(words) {
-        *instr = Some(Instr::decode(word, request.side_bits, request.side_optional));
+        *instr = Some(Instr::decode(word, request.side_bits(), request.side_optional()));
     }
 
     let [test, marker, ..] = &mut block.sms;
-    test.config.set_wrap(u5::new(request.wrap_target), u5::new(request.wrap_source));
+    test.config = Config::from_registers(request.execctrl, request.shiftctrl, request.pinctrl);
     test.state.pc = u5::new(request.origin);
-    marker.config.set_wrap(u5::new(MAX_WORDS as u8), u5::new(MAX_WORDS as u8 + 1));
+    for word in &request.tx[..request.tx_len] {
+        test.state.tx_fifo.push(*word);
+    }
+    marker.config = Config::from_registers(MARKER_EXECCTRL, 0x000c_0000, 0);
     marker.state.pc = u5::new(MAX_WORDS as u8);
     test.enabled = true;
     marker.enabled = true;
@@ -139,7 +143,7 @@ fn emulate(request: &Request) -> Vec<String> {
                 *destination = *word;
             }
             format!(
-                "{},{},{},-,{:08x},{:08x},{:02x},{:08x},-,{},{:08x},{:08x},{:08x},{:08x},{:08x},{:08x},{:08x},{:08x}",
+                "{},{},{},{:08x},{:08x},{:02x},{:08x},-,{},{:08x},{:08x},{:08x},{:08x},{:08x},{:08x},{:08x},{:08x}",
                 tick,
                 test.pc.value(),
                 marker.pc.value(),
@@ -210,34 +214,44 @@ fn random_word(rng: &mut Rng, origin: u8, len: usize) -> u16 {
 fn random_request(rng: &mut Rng) -> Request {
     let len = 1 + rng.below(RANDOM_MAX_LEN) as usize;
     let origin = rng.below((MAX_WORDS - len + 1) as u64) as u8;
-    let wrap_source = origin + rng.below(len as u64) as u8;
-    let wrap_target = origin + rng.below((wrap_source - origin + 1) as u64) as u8;
+    let wrap_top = origin as u32 + rng.below(len as u64) as u32;
+    let wrap_bottom = origin as u32 + rng.below(wrap_top as u64 - origin as u64 + 1) as u32;
+    let mut field = |values: u64, lsb: u32| (rng.below(values) as u32) << lsb;
+    let execctrl = field(32, 0) | field(2, 5) | wrap_bottom << 7 | wrap_top << 12;
+    let shiftctrl = field(16, 16) | field(32, 20) | field(32, 25);
+    let pinctrl = field(32, 0) | field(32, 5) | field(32, 15) | field(33, 20) | field(6, 26);
     let mut request = Request {
         ticks: RANDOM_TICKS,
+        execctrl,
+        shiftctrl,
+        pinctrl,
         origin,
-        wrap_target,
-        wrap_source,
-        side_bits: 0,
-        side_optional: false,
-        side_pindirs: false,
         len,
         code: [0; MAX_WORDS],
+        tx_len: rng.below(MAX_TX as u64 + 1) as usize,
+        tx: [0; MAX_TX],
     };
     for word in &mut request.code[..len] {
         *word = random_word(rng, origin, len);
+    }
+    for word in &mut request.tx[..request.tx_len] {
+        *word = rng.next() as u32;
     }
     request
 }
 
 fn disassemble(request: &Request) -> String {
     let mut text = format!(
-        "  origin {}, wrap {}..{}\n",
-        request.origin, request.wrap_target, request.wrap_source
+        "  execctrl {:08x}, shiftctrl {:08x}, pinctrl {:08x}, tx {:08x?}\n",
+        request.execctrl,
+        request.shiftctrl,
+        request.pinctrl,
+        &request.tx[..request.tx_len]
     );
     for (slot, word) in (request.origin as usize..).zip(&request.code[..request.len]) {
         text += &format!(
             "  {slot:2}: {word:04x}  {}\n",
-            Instr::decode(*word, request.side_bits, request.side_optional)
+            Instr::decode(*word, request.side_bits(), request.side_optional())
         );
     }
     text
@@ -250,14 +264,14 @@ mod tests {
     fn emulated_trace() {
         let mut request = Request {
             ticks: 16,
+            execctrl: 1 << 30 | 6 << 12 | 4 << 7,
+            shiftctrl: 0x000c_0000,
+            pinctrl: 2 << 29 | 5 << 26,
             origin: 4,
-            wrap_target: 4,
-            wrap_source: 6,
-            side_bits: 2,
-            side_optional: true,
-            side_pindirs: false,
             len: 3,
             code: [0; MAX_WORDS],
+            tx_len: 0,
+            tx: [0; MAX_TX],
         };
         request.code[..3].copy_from_slice(&[0xf823, 0x0245, 0x80a0]);
         let rows = emulate(&request);

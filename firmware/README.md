@@ -37,22 +37,20 @@ Each CSV row is reconstructed independently: row N resets PIO0, reloads the
 program, executes N ticks, captures readable state, then destructively extracts
 X, Y, ISR, and OSR through SM0's RX FIFO. Consequently, collecting N rows executes
 N(N+1)/2 ticks. Existing RX words appear in `rx_count` and `rx0` through `rx3`.
-`stalled` is the hardware EXEC_STALLED bit, not a general indication of a blocked
-program instruction. No TX FIFO data or external pin stimulus is supplied;
-blocking PULL/WAIT instructions may stay blocked. Shift directions are right,
-autopush/autopull are disabled, pin bases are zero, SET count is five, and OUT
-count is zero, matching the original prototype defaults. Physical GPIO routing
-is not configured. Replays assume repeatable external inputs.
+SM0's EXECCTRL, SHIFTCTRL and PINCTRL come from the request, and the request's TX
+words are loaded into SM0's TX FIFO before the first tick. No external pin stimulus
+is supplied, physical GPIO routing is not configured, and replays assume repeatable
+external inputs.
 
 The shared `protocol` crate defines the newline-delimited request:
 
 ```text
-RUN1 ticks origin wrap_target wrap_source side_bits side_flags word_count hex_words...\n
+RUN2 ticks execctrl shiftctrl pinctrl origin word_count hex_words... tx_count hex_tx_words...\n
 ```
 
-Metadata is decimal; instruction words are hexadecimal. Side flags use bit 0 for
-optional side-set and bit 1 for pin directions; `side_bits` includes the optional
-enable bit. Addresses, including JMP targets, are absolute.
-The firmware accepts requests split across USB packets. It responds with the CSV
-header, the requested rows, and `DONE`, or an `ERR message` line. Wait for completion
-before sending another request.
+Counts, ticks and the origin are decimal; registers and words are hexadecimal.
+Wrap and side-set come from EXECCTRL and PINCTRL. Addresses, including JMP targets,
+are absolute. The firmware accepts requests split across USB packets. It responds
+with the CSV header, the requested rows, and `DONE`, or an `ERR message` line, and
+stops sending once the host closes the port. Wait for completion before sending
+another request.
