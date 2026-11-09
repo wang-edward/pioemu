@@ -163,6 +163,7 @@ impl StateMachine {
             (None, true) => self.state.delay_counter -= 1,
             (None, false) => {
                 let mut advance_pc = true;
+                let mut wrote_pins = false;
                 let exec = self.state.exec.take();
                 self.state.stalled = false;
                 let status = match self.config.status {
@@ -237,6 +238,7 @@ impl StateMachine {
                                 self.state.isr_shift_count = 0;
                             } else {
                                 self.state.stalled = true;
+                                self.state.rx_stalled = true;
                             }
                         } else {
                             self.state.isr = isr;
@@ -247,6 +249,7 @@ impl StateMachine {
                         let bit_count = if bit_count.value() == 0 { 32 } else { bit_count.value() };
                         if self.config.autopull && self.state.osr_shift_count >= self.config.calc_pull_thresh() {
                             self.state.stalled = true;
+                            self.state.tx_stalled |= self.state.tx_fifo.is_empty();
                         } else {
                             let data = match self.config.out_shiftdir {
                                 ShiftDir::Left => {
@@ -260,16 +263,17 @@ impl StateMachine {
                                     ans
                                 }
                             };
+                            let enabled = self.config.out_enable_bit.is_none_or(|bit| data >> bit & 1 == 1);
                             match destn {
-                                shift::Destn::Pins => {
-                                    write_pins(gpio_out, data, self.config.out_base.get(), self.config.out_count.get());
+                                shift::Destn::Pins | shift::Destn::PinDirs => {
+                                    let dirs = matches!(destn, shift::Destn::PinDirs);
+                                    let write = (dirs, data, self.config.out_base.get(), self.config.out_count.get());
+                                    self.state.last_pin_write = enabled.then_some(write);
+                                    wrote_pins = true;
                                 }
                                 shift::Destn::X => self.state.x = data,
                                 shift::Destn::Y => self.state.y = data,
                                 shift::Destn::Null => (),
-                                shift::Destn::PinDirs => {
-                                    write_pins(gpio_dir, data, self.config.out_base.get(), self.config.out_count.get());
-                                }
                                 shift::Destn::Pc => {
                                     self.state.pc = u5::new(data as u8 & 31);
                                     advance_pc = false;
@@ -287,12 +291,15 @@ impl StateMachine {
                     Instruction::Push { if_full, block } => {
                         let (if_full, block) = (if_full.value() == 1, block.value() == 1);
                         let should_push = !if_full || (self.state.isr_shift_count >= self.config.calc_push_thresh());
-                        if should_push && block && self.state.rx_fifo.is_full() {
-                            self.state.stalled = true;
-                        } else if should_push {
-                            self.state.rx_fifo.push(self.state.isr);
-                            self.state.isr = 0;
-                            self.state.isr_shift_count = 0;
+                        if should_push {
+                            let pushed = self.state.rx_fifo.push(self.state.isr);
+                            self.state.rx_stalled |= !pushed;
+                            if pushed || !block {
+                                self.state.isr = 0;
+                                self.state.isr_shift_count = 0;
+                            } else {
+                                self.state.stalled = true;
+                            }
                         }
                     }
                     Instruction::Pull { if_empty, block } => {
@@ -306,8 +313,12 @@ impl StateMachine {
                                     self.state.osr = word;
                                     self.state.osr_shift_count = 0;
                                 }
-                                (None, true) => self.state.stalled = true,
+                                (None, true) => {
+                                    self.state.stalled = true;
+                                    self.state.tx_stalled = true;
+                                }
                                 (None, false) => {
+                                    self.state.tx_stalled = true;
                                     self.state.osr = self.state.x;
                                     self.state.osr_shift_count = 0;
                                 }
@@ -331,14 +342,15 @@ impl StateMachine {
                             mov::Op::Reserved => !reverse(data),
                         };
                         match destn {
-                            mov::Destn::Pins => {
-                                write_pins(gpio_out, data, self.config.out_base.get(), self.config.out_count.get());
+                            mov::Destn::Pins | mov::Destn::PinDirs => {
+                                let enabled = self.config.out_enable_bit.is_none_or(|bit| data >> bit & 1 == 1);
+                                let dirs = matches!(destn, mov::Destn::PinDirs);
+                                let write = (dirs, data, self.config.out_base.get(), self.config.out_count.get());
+                                self.state.last_pin_write = enabled.then_some(write);
+                                wrote_pins = true;
                             }
                             mov::Destn::X => self.state.x = data,
                             mov::Destn::Y => self.state.y = data,
-                            mov::Destn::PinDirs => {
-                                write_pins(gpio_dir, data, self.config.out_base.get(), self.config.out_count.get());
-                            }
                             mov::Destn::Exec => self.state.exec = Some(data as u16),
                             mov::Destn::Pc => {
                                 self.state.pc = u5::new(data as u8 & 31);
@@ -365,13 +377,11 @@ impl StateMachine {
                         }
                     },
                     Instruction::Set { destn, data } => match destn {
-                        set::Destn::Pins => {
-                            write_pins(
-                                gpio_out,
-                                data.value() as u32,
-                                self.config.set_base.get(),
-                                self.config.set_count.get(),
-                            );
+                        set::Destn::Pins | set::Destn::PinDirs => {
+                            let dirs = matches!(destn, set::Destn::PinDirs);
+                            let write = (dirs, data.value() as u32, self.config.set_base.get(), self.config.set_count.get());
+                            self.state.last_pin_write = Some(write);
+                            wrote_pins = true;
                         }
                         set::Destn::X => {
                             self.state.x = data.value() as u32;
@@ -379,22 +389,27 @@ impl StateMachine {
                         set::Destn::Y => {
                             self.state.y = data.value() as u32;
                         }
-                        set::Destn::PinDirs => {
-                            write_pins(
-                                gpio_dir,
-                                data.value() as u32,
-                                self.config.set_base.get(),
-                                self.config.set_count.get(),
-                            );
-                        }
                         set::Destn::Reserved1 | set::Destn::Reserved2 | set::Destn::Reserved3 | set::Destn::Reserved4 => (),
                     },
                 }
 
-                if let Some(value) = instr.side_set {
-                    let pins = if self.config.side_pindir { gpio_dir } else { gpio_out };
-                    let count = self.config.sideset_count.get() - self.config.sideset_en as u8;
-                    write_pins(pins, value.value() as u32, self.config.sideset_base.get(), count);
+                let side_count = self.config.sideset_count.get() - self.config.sideset_en as u8;
+                let side_write = instr.side_set.map(|value| {
+                    (
+                        self.config.side_pindir,
+                        value.value() as u32,
+                        self.config.sideset_base.get(),
+                        side_count,
+                    )
+                });
+                let pin_write = self.state.last_pin_write.filter(|_| wrote_pins || self.config.out_sticky);
+                let writes = if self.config.out_sticky {
+                    [side_write, pin_write]
+                } else {
+                    [pin_write, side_write]
+                };
+                for (dirs, data, base, count) in writes.into_iter().flatten() {
+                    write_pins(if dirs { &mut *gpio_dir } else { &mut *gpio_out }, data, base, count);
                 }
                 if self.state.stalled {
                     self.state.exec = exec;
@@ -432,6 +447,9 @@ pub struct State {
     pub rx_fifo: Fifo,
     pub delay_counter: u8,
     pub stalled: bool,
+    pub tx_stalled: bool,
+    pub rx_stalled: bool,
+    last_pin_write: Option<(bool, u32, u8, u8)>,
     irq_wait: Option<u8>,
     exec: Option<u16>,
 }
@@ -450,6 +468,9 @@ impl State {
             rx_fifo: Fifo::new(FIFO_DEPTH),
             delay_counter: 0,
             stalled: false,
+            tx_stalled: false,
+            rx_stalled: false,
+            last_pin_write: None,
             irq_wait: None,
             exec: None,
         }
@@ -486,6 +507,8 @@ pub struct Config {
     sideset_en: bool,
     side_pindir: bool,
     jmp_pin: u5,
+    out_enable_bit: Option<u8>,
+    out_sticky: bool,
     // out_en_sel: u5,
     wrap_top: u5,
     wrap_bottom: u5,
@@ -531,6 +554,8 @@ impl Config {
             sideset_en: field(execctrl, 30, 1) == 1,
             side_pindir: field(execctrl, 29, 1) == 1,
             jmp_pin: u5::new(field(execctrl, 24, 5)),
+            out_enable_bit: (field(execctrl, 18, 1) == 1).then(|| field(execctrl, 19, 5)),
+            out_sticky: field(execctrl, 17, 1) == 1,
             wrap_top: u5::new(field(execctrl, 12, 5)),
             wrap_bottom: u5::new(field(execctrl, 7, 5)),
             status: match field(execctrl, 5, 2) {

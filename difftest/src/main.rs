@@ -12,7 +12,6 @@ const RANDOM_TICKS: u32 = 32;
 const RANDOM_MAX_LEN: u64 = 8;
 const MARKER_NOP: u16 = 0xa042;
 const MARKER_EXECCTRL: u32 = (MAX_WORDS as u32) << 7 | (MAX_WORDS as u32 + 1) << 12;
-const UNCOMPARED: [&str; 1] = ["fdebug"];
 
 fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -153,13 +152,16 @@ fn emulate(request: &Request) -> Vec<String> {
             let flevel = block.sms.iter().enumerate().fold(0, |flevel, (i, sm)| {
                 flevel | (sm.state.tx_fifo.len() as u32) << (8 * i) | (sm.state.rx_fifo.len() as u32) << (8 * i + 4)
             });
+            let fdebug = block.sms.iter().enumerate().fold(0, |fdebug, (i, sm)| {
+                fdebug | (sm.state.rx_stalled as u32) << i | (sm.state.tx_stalled as u32) << (24 + i)
+            });
             let (test, marker) = (&block.sms[0].state, &block.sms[1].state);
             let mut rx = [0u32; 4];
             for (destination, word) in rx.iter_mut().zip(test.rx_fifo.iter()) {
                 *destination = *word;
             }
             format!(
-                "{},{},{},{:08x},{:08x},{:02x},{:08x},-,{},{:08x},{:08x},{:08x},{:08x},{:08x},{:08x},{:08x},{:08x}",
+                "{},{},{},{:08x},{:08x},{:02x},{:08x},{:08x},{},{:08x},{:08x},{:08x},{:08x},{:08x},{:08x},{:08x},{:08x}",
                 tick,
                 test.pc.value(),
                 marker.pc.value(),
@@ -167,6 +169,7 @@ fn emulate(request: &Request) -> Vec<String> {
                 block.gpio_dir,
                 block.irq_flags,
                 flevel,
+                fdebug,
                 test.rx_fifo.len(),
                 rx[0],
                 rx[1],
@@ -186,7 +189,7 @@ fn first_difference(hardware: &[String], emulator: &[String]) -> Option<String> 
         let columns: String = CSV_HEADER
             .split(',')
             .zip(hardware_row.split(',').zip(emulator_row.split(',')))
-            .filter(|(column, (hw, emu))| !UNCOMPARED.contains(column) && hw != emu)
+            .filter(|(_, (hw, emu))| hw != emu)
             .map(|(column, (hw, emu))| format!("  {column}: hardware {hw}, emulator {emu}\n"))
             .collect();
         let tick = hardware_row.split(',').next().unwrap_or("?");
@@ -206,7 +209,8 @@ impl Rng {
     }
     fn below(&mut self, n: u64) -> u16 {
         (self.next() % n) as u16
-    }}
+    }
+}
 
 fn random_word(rng: &mut Rng, origin: u8, len: usize) -> u16 {
     let (opcode, a, b) = match rng.below(9) {
@@ -244,7 +248,7 @@ fn random_request(rng: &mut Rng) -> Request {
     let mut field = |values: u64, lsb: u32| (rng.below(values) as u32) << lsb;
     let side_count = field(6, 0);
     let side_en = if side_count > 0 { field(2, 30) } else { 0 };
-    let execctrl = field(32, 0) | field(4, 5) | field(32, 24) | wrap_bottom << 7 | wrap_top << 12 | field(2, 29) | side_en;
+    let execctrl = field(32, 0) | field(4, 5) | field(128, 17) | field(32, 24) | wrap_bottom << 7 | wrap_top << 12 | field(2, 29) | side_en;
     let shiftctrl = field(32, 0) | field(16, 16) | field(32, 20) | field(32, 25);
     let pinctrl = field(32, 0) | field(32, 5) | field(32, 10) | field(32, 15) | field(33, 20) | field(6, 26) | side_count << 29;
     let mut request = Request {
