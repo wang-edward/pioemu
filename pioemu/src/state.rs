@@ -103,6 +103,11 @@ pub fn to_mask(val: u8) -> u32 {
     if val == 32 { u32::MAX } else { (1u32 << val) - 1 }
 }
 
+fn write_pins(pins: &mut u32, data: u32, base: u8, count: u8) {
+    let mask = to_mask(count).rotate_left(base as u32);
+    *pins = (*pins & !mask) | (data.rotate_left(base as u32) & mask);
+}
+
 pub fn wrap_shiftr(x: u32, shift: u8) -> u32 {
     x.rotate_right(shift as u32)
 }
@@ -257,17 +262,13 @@ impl StateMachine {
                 };
                 match destn {
                     shift::Destn::Pins => {
-                        let (out_count, out_base) = (self.config.out_count.get(), self.config.out_base.get());
-                        let mask = to_mask(out_count) << out_base;
-                        *gpio_out = (*gpio_out & !mask) | ((data << out_base) & mask);
+                        write_pins(gpio_out, data, self.config.out_base.get(), self.config.out_count.get());
                     }
                     shift::Destn::X => self.state.x = data,
                     shift::Destn::Y => self.state.y = data,
                     shift::Destn::Null => (),
                     shift::Destn::PinDirs => {
-                        let (out_count, out_base) = (self.config.out_count.get(), self.config.out_base.get());
-                        let mask = to_mask(out_count) << out_base;
-                        *gpio_dir = (*gpio_dir & !mask) | ((data << out_base) & mask);
+                        write_pins(gpio_dir, data, self.config.out_base.get(), self.config.out_count.get());
                     }
                     shift::Destn::Pc => {
                         self.state.pc = u5::new(data as u8);
@@ -352,9 +353,7 @@ impl StateMachine {
                 };
                 match destn {
                     mov::Destn::Pins => {
-                        let (out_count, out_base) = (self.config.out_count.get(), self.config.out_base.get());
-                        let mask = to_mask(out_count) << out_base;
-                        *gpio_out = (*gpio_out & !mask) | ((data << out_base) & mask);
+                        write_pins(gpio_out, data, self.config.out_base.get(), self.config.out_count.get());
                     }
                     mov::Destn::X => self.state.x = data,
                     mov::Destn::Y => self.state.y = data,
@@ -385,10 +384,12 @@ impl StateMachine {
             }
             Instruction::Set { destn, data } => match destn {
                 set::Destn::Pins => {
-                    let (base, cnt) = (self.config.set_base.get() as u32, self.config.set_count.get());
-                    let data = data.value() as u32;
-                    let mask = if cnt == 32 { u32::MAX } else { to_mask(cnt) << base };
-                    *gpio_out = (*gpio_out & !mask) | ((data << base) & mask);
+                    write_pins(
+                        gpio_out,
+                        data.value() as u32,
+                        self.config.set_base.get(),
+                        self.config.set_count.get(),
+                    );
                 }
                 set::Destn::X => {
                     self.state.x = data.value() as u32;
@@ -397,10 +398,12 @@ impl StateMachine {
                     self.state.y = data.value() as u32;
                 }
                 set::Destn::PinDirs => {
-                    let (base, cnt) = (self.config.set_base.get() as u32, self.config.set_count.get());
-                    let data = data.value() as u32;
-                    let mask = if cnt == 32 { u32::MAX } else { to_mask(cnt) << base };
-                    *gpio_dir = (*gpio_dir & !mask) | ((data << base) & mask);
+                    write_pins(
+                        gpio_dir,
+                        data.value() as u32,
+                        self.config.set_base.get(),
+                        self.config.set_count.get(),
+                    );
                 }
                 _ => panic!(),
             },
