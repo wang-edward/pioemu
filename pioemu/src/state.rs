@@ -103,6 +103,11 @@ pub fn to_mask(val: u8) -> u32 {
     if val == 32 { u32::MAX } else { (1u32 << val) - 1 }
 }
 
+fn write_pins(pins: &mut u32, data: u32, base: u8, count: u8) {
+    let mask = to_mask(count).rotate_left(base as u32);
+    *pins = (*pins & !mask) | (data.rotate_left(base as u32) & mask);
+}
+
 pub fn wrap_shiftr(x: u32, shift: u8) -> u32 {
     x.rotate_right(shift as u32)
 }
@@ -143,6 +148,17 @@ pub fn sat_shr(x: u32, n: u8) -> u32 {
 impl StateMachine {
     // TODO function for gpio in / out mapping
     fn execute(&mut self, instr: &Instr, gpio_out: &mut u32, gpio_dir: &mut u32, gpio_in: u32, irq_flags: &mut u8, sm_id: u8) {
+        let threshold = self.config.calc_pull_thresh();
+        let was_empty = self.state.osr_shift_count >= threshold;
+        self.execute_instr(instr, gpio_out, gpio_dir, gpio_in, irq_flags, sm_id);
+        let count = self.state.osr_shift_count;
+        if self.config.autopull && (was_empty && count >= threshold || count == threshold) && !self.state.tx_fifo.is_empty() {
+            self.state.osr = self.state.tx_fifo.pop().expect("tx fifo empty when it shouldn't be");
+            self.state.osr_shift_count = 0;
+        }
+    }
+
+    fn execute_instr(&mut self, instr: &Instr, gpio_out: &mut u32, gpio_dir: &mut u32, gpio_in: u32, irq_flags: &mut u8, sm_id: u8) {
         if let Some(irq_index) = self.state.irq_wait {
             if !bit_at(*irq_flags, irq_index) {
                 self.state.irq_wait = None;
@@ -215,32 +231,29 @@ impl StateMachine {
                     shift::Source::Osr => self.state.osr,
                     _ => panic!(),
                 } & to_mask(bit_count);
-                match self.config.in_shiftdir {
-                    ShiftDir::Left => self.state.isr = sat_shl(self.state.isr, bit_count) | data,
-                    ShiftDir::Right => self.state.isr = sat_shr(self.state.isr, bit_count) | wrap_shiftr(data, bit_count),
-                }
-                self.state.isr_shift_count = cmp::min(63, self.state.isr_shift_count + bit_count);
-                // TODO handle autopush: If automatic push is enabled, IN will also push the ISR contents to the RX FIFO if the push threshold is reached (SHIFTCTRL_PUSH_THRESH). IN still executes in one cycle, whether an automatic push takes place or not. The state machine will stall if the RX FIFO is full when an automatic push occurs. An automatic push clears the ISR contents to all-zeroes, and clears the input shift count. See Section 3.5.4 }
-                if self.config.autopush && self.state.isr_shift_count >= self.config.calc_push_thresh() {
+                let isr = match self.config.in_shiftdir {
+                    ShiftDir::Left => sat_shl(self.state.isr, bit_count) | data,
+                    ShiftDir::Right => sat_shr(self.state.isr, bit_count) | wrap_shiftr(data, bit_count),
+                };
+                let isr_shift_count = cmp::min(63, self.state.isr_shift_count + bit_count);
+                if self.config.autopush && isr_shift_count >= self.config.calc_push_thresh() {
                     if self.state.rx_fifo.is_full() {
                         self.state.stalled = true;
                         return;
                     }
-                    self.state.rx_fifo.push(self.state.isr);
+                    self.state.rx_fifo.push(isr);
                     self.state.isr = 0;
                     self.state.isr_shift_count = 0;
+                } else {
+                    self.state.isr = isr;
+                    self.state.isr_shift_count = isr_shift_count;
                 }
             }
             Instruction::Out { destn, bit_count } => {
                 let bit_count = if bit_count.value() == 0 { 32 } else { bit_count.value() };
                 if self.config.autopull && self.state.osr_shift_count >= self.config.calc_pull_thresh() {
-                    if self.state.tx_fifo.is_empty() {
-                        self.state.stalled = true;
-                        return;
-                    }
-                    // todo ? here?
-                    self.state.osr = self.state.tx_fifo.pop().expect("tx fifo empty when it shouldn't be");
-                    self.state.osr_shift_count = 0;
+                    self.state.stalled = true;
+                    return;
                 }
 
                 let data = match self.config.out_shiftdir {
@@ -257,17 +270,13 @@ impl StateMachine {
                 };
                 match destn {
                     shift::Destn::Pins => {
-                        let (out_count, out_base) = (self.config.out_count.get(), self.config.out_base.get());
-                        let mask = to_mask(out_count) << out_base;
-                        *gpio_out = (*gpio_out & !mask) | ((data << out_base) & mask);
+                        write_pins(gpio_out, data, self.config.out_base.get(), self.config.out_count.get());
                     }
                     shift::Destn::X => self.state.x = data,
                     shift::Destn::Y => self.state.y = data,
                     shift::Destn::Null => (),
                     shift::Destn::PinDirs => {
-                        let (out_count, out_base) = (self.config.out_count.get(), self.config.out_base.get());
-                        let mask = to_mask(out_count) << out_base;
-                        *gpio_dir = (*gpio_dir & !mask) | ((data << out_base) & mask);
+                        write_pins(gpio_dir, data, self.config.out_base.get(), self.config.out_count.get());
                     }
                     shift::Destn::Pc => {
                         self.state.pc = u5::new(data as u8);
@@ -280,13 +289,7 @@ impl StateMachine {
                     shift::Destn::Exec => panic!(), // todo EXEC destn. i think we need to have bit decoding for this to work
                 }
 
-                self.state.osr_shift_count = cmp::min(63, self.state.osr_shift_count + bit_count);
-                if self.config.autopull && self.state.osr_shift_count >= self.config.calc_pull_thresh() {
-                    if !self.state.tx_fifo.is_empty() {
-                        self.state.osr = self.state.tx_fifo.pop().expect("tx fifo empty when it shouldn't be");
-                        self.state.osr_shift_count = 0;
-                    }
-                }
+                self.state.osr_shift_count = cmp::min(32, self.state.osr_shift_count + bit_count);
             }
             Instruction::Push { if_full, block } => {
                 let (if_full, block) = (if_full.value() == 1, block.value() == 1);
@@ -305,10 +308,10 @@ impl StateMachine {
                 }
             }
             Instruction::Pull { if_empty, block } => {
-                // TODO autopull noop and stuff
                 // TODO program checker (don't use mov dst, osr when autopull on and more)
                 let (if_empty, block) = (if_empty.value() == 1, block.value() == 1);
-                let should_pull = !if_empty | (self.state.osr_shift_count >= self.config.calc_pull_thresh());
+                let should_pull = !(self.config.autopull && self.state.osr_shift_count == 0)
+                    && (!if_empty || self.state.osr_shift_count >= self.config.calc_pull_thresh());
                 if should_pull {
                     if self.state.tx_fifo.is_empty() {
                         if block {
@@ -352,9 +355,7 @@ impl StateMachine {
                 };
                 match destn {
                     mov::Destn::Pins => {
-                        let (out_count, out_base) = (self.config.out_count.get(), self.config.out_base.get());
-                        let mask = to_mask(out_count) << out_base;
-                        *gpio_out = (*gpio_out & !mask) | ((data << out_base) & mask);
+                        write_pins(gpio_out, data, self.config.out_base.get(), self.config.out_count.get());
                     }
                     mov::Destn::X => self.state.x = data,
                     mov::Destn::Y => self.state.y = data,
@@ -385,10 +386,12 @@ impl StateMachine {
             }
             Instruction::Set { destn, data } => match destn {
                 set::Destn::Pins => {
-                    let (base, cnt) = (self.config.set_base.get() as u32, self.config.set_count.get());
-                    let data = data.value() as u32;
-                    let mask = if cnt == 32 { u32::MAX } else { to_mask(cnt) << base };
-                    *gpio_out = (*gpio_out & !mask) | ((data << base) & mask);
+                    write_pins(
+                        gpio_out,
+                        data.value() as u32,
+                        self.config.set_base.get(),
+                        self.config.set_count.get(),
+                    );
                 }
                 set::Destn::X => {
                     self.state.x = data.value() as u32;
@@ -397,22 +400,15 @@ impl StateMachine {
                     self.state.y = data.value() as u32;
                 }
                 set::Destn::PinDirs => {
-                    let (base, cnt) = (self.config.set_base.get() as u32, self.config.set_count.get());
-                    let data = data.value() as u32;
-                    let mask = if cnt == 32 { u32::MAX } else { to_mask(cnt) << base };
-                    *gpio_dir = (*gpio_dir & !mask) | ((data << base) & mask);
+                    write_pins(
+                        gpio_dir,
+                        data.value() as u32,
+                        self.config.set_base.get(),
+                        self.config.set_count.get(),
+                    );
                 }
                 _ => panic!(),
             },
-        }
-
-        if !matches!(instr.instruction, Instruction::Out { .. }) {
-            if self.config.autopull && self.state.osr_shift_count >= self.config.calc_pull_thresh() {
-                if !self.state.tx_fifo.is_empty() {
-                    self.state.osr = self.state.tx_fifo.pop().expect("tx fifo empty when it shouldn't be");
-                    self.state.osr_shift_count = 0;
-                }
-            }
         }
 
         self.state.delay_counter = instr.delay.value();
@@ -499,7 +495,7 @@ pub struct Config {
     wrap_top: u5,
     wrap_bottom: u5,
     status_sel: StatusSel,
-    status_n: Range<0, 31>,
+    status_n: Range<0, 15>,
 
     // shiftctrl
     pull_thresh: Range<0, 31>,
@@ -547,7 +543,7 @@ impl Config {
                 1 => StatusSel::RxLevel,
                 _ => panic!(),
             },
-            status_n: Range::new(field(execctrl, 0, 5)),
+            status_n: Range::new(field(execctrl, 0, 4)),
             pull_thresh: Range::new(field(shiftctrl, 25, 5)),
             push_thresh: Range::new(field(shiftctrl, 20, 5)),
             out_shiftdir: shift_dir(19),
