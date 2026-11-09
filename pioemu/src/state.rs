@@ -502,7 +502,7 @@ pub struct Config {
     wrap_top: u5,
     wrap_bottom: u5,
     status_sel: StatusSel,
-    status_n: Range<0, 31>,
+    status_n: Range<0, 15>,
 
     // shiftctrl
     pull_thresh: Range<0, 31>,
@@ -550,7 +550,7 @@ impl Config {
                 1 => StatusSel::RxLevel,
                 _ => panic!(),
             },
-            status_n: Range::new(field(execctrl, 0, 5)),
+            status_n: Range::new(field(execctrl, 0, 4)),
             pull_thresh: Range::new(field(shiftctrl, 25, 5)),
             push_thresh: Range::new(field(shiftctrl, 20, 5)),
             out_shiftdir: shift_dir(19),
