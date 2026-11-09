@@ -100,7 +100,7 @@ impl Hardware {
             } else {
                 let tick = rows.len() as u32 + 1;
                 if tick > request.ticks
-                    || response.split(',').count() != 17
+                    || response.split(',').count() != CSV_HEADER.split(',').count()
                     || response.split(',').next().and_then(|tick| tick.parse::<u32>().ok()) != Some(tick)
                 {
                     return Err(format!("Invalid trace row: {response}").into());
