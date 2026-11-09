@@ -150,6 +150,7 @@ fn emulate(request: &Request) -> Vec<String> {
     test.state.osr = request.osr;
     test.state.osr_shift_count = request.osr_count;
     block.irq_flags = request.irq;
+    block.gpio_in = request.gpio_in;
     marker.config = Config::from_registers(MARKER_EXECCTRL, 0x000c_0000, 0);
     marker.state.pc = u5::new(MAX_WORDS as u8);
     test.enabled = true;
@@ -280,6 +281,7 @@ fn random_request(rng: &mut Rng) -> Request {
         osr: random_value(rng, origin, len),
         osr_count: rng.below(33) as u8,
         irq: rng.below(256) as u8,
+        gpio_in: rng.next() as u32,
     };
     request.osr = osr_reachable(request.osr, request.osr_count, request.out_shift_right());
     for word in &mut request.code[..len] {
@@ -293,7 +295,7 @@ fn random_request(rng: &mut Rng) -> Request {
 
 fn disassemble(request: &Request) -> String {
     let mut text = format!(
-        "  execctrl {:08x}, shiftctrl {:08x}, pinctrl {:08x}, tx {:08x?}\n  x {:08x}, y {:08x}, isr {:08x} ({}), osr {:08x} ({}), irq {:02x}\n",
+        "  execctrl {:08x}, shiftctrl {:08x}, pinctrl {:08x}, tx {:08x?}\n  x {:08x}, y {:08x}, isr {:08x} ({}), osr {:08x} ({}), irq {:02x}, gpio_in {:08x}\n",
         request.execctrl,
         request.shiftctrl,
         request.pinctrl,
@@ -304,7 +306,8 @@ fn disassemble(request: &Request) -> String {
         request.isr_count,
         request.osr,
         request.osr_count,
-        request.irq
+        request.irq,
+        request.gpio_in
     );
     for (slot, word) in (request.origin as usize..).zip(&request.code[..request.len]) {
         text += &format!(
@@ -337,6 +340,7 @@ mod tests {
             osr: 0,
             osr_count: 32,
             irq: 0,
+            gpio_in: 0,
         };
         request.code[..3].copy_from_slice(&[0xf823, 0x0245, 0x80a0]);
         let rows = emulate(&request);

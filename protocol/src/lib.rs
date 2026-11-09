@@ -25,6 +25,7 @@ pub struct Request {
     pub osr: u32,
     pub osr_count: u8,
     pub irq: u8,
+    pub gpio_in: u32,
 }
 
 impl Request {
@@ -112,11 +113,12 @@ impl Request {
         let osr = number(16)?;
         let osr_count = u8::try_from(number(10)?).map_err(|_| "field out of range")?;
         let irq = u8::try_from(number(16)?).map_err(|_| "field out of range")?;
+        let gpio_in = number(16)?;
         if fields.next().is_some() {
             return Err("extra fields");
         }
         let request =
-            Self { ticks, execctrl, shiftctrl, pinctrl, origin, len, code, tx_len, tx, x, y, isr, isr_count, osr, osr_count, irq };
+            Self { ticks, execctrl, shiftctrl, pinctrl, origin, len, code, tx_len, tx, x, y, isr, isr_count, osr, osr_count, irq, gpio_in };
         request.validate()?;
         Ok(request)
     }
@@ -136,8 +138,8 @@ impl Request {
         }
         writeln!(
             output,
-            " {:08x} {:08x} {:08x} {} {:08x} {} {:02x}",
-            self.x, self.y, self.isr, self.isr_count, self.osr, self.osr_count, self.irq
+            " {:08x} {:08x} {:08x} {} {:08x} {} {:02x} {:08x}",
+            self.x, self.y, self.isr, self.isr_count, self.osr, self.osr_count, self.irq, self.gpio_in
         )
     }
 }
@@ -194,7 +196,7 @@ mod tests {
     #[test]
     fn framing_and_recovery() {
         let line =
-            b"RUN2 16 00002000 000c0000 14000000 0 3 e023 0241 80a0 2 12345678 9abcdef0 00000001 00000002 00000003 4 00000005 6 ff\r\n";
+            b"RUN2 16 00002000 000c0000 14000000 0 3 e023 0241 80a0 2 12345678 9abcdef0 00000001 00000002 00000003 4 00000005 6 ff 89abcdef\r\n";
         let mut decoder = Decoder::default();
         for _ in 0..300 {
             assert!(decoder.push(b'x').is_none());
@@ -209,12 +211,16 @@ mod tests {
             assert_eq!((request.wrap_bottom(), request.wrap_top()), (0, 2));
             assert_eq!(&request.code[..3], &[0xe023, 0x0241, 0x80a0]);
             assert_eq!(&request.tx[..request.tx_len], &[0x1234_5678, 0x9abc_def0]);
-            assert_eq!((request.isr, request.isr_count, request.osr_count, request.irq), (3, 4, 6, 0xff));
+            assert_eq!(
+                (request.isr, request.isr_count, request.osr_count, request.irq, request.gpio_in),
+                (3, 4, 6, 0xff, 0x89ab_cdef)
+            );
         }
     }
     #[test]
     fn round_trip() {
-        let line = "RUN2 7 40006200 000f0000 40000000 4 3 f823 0245 80a0 1 deadbeef 00000000 ffffffff 80000000 32 00000000 32 00\n";
+        let line =
+            "RUN2 7 40006200 000f0000 40000000 4 3 f823 0245 80a0 1 deadbeef 00000000 ffffffff 80000000 32 00000000 32 00 00000000\n";
         let mut wire = String::new();
         Request::parse(line).unwrap().write(&mut wire).unwrap();
         assert_eq!(wire, line);
@@ -222,18 +228,18 @@ mod tests {
     #[test]
     fn invalid_requests() {
         for line in [
-            "RUN2 0 00000000 000c0000 14000000 0 1 e023 0 0 0 0 0 0 32 0",
-            "RUN2 1001 00000000 000c0000 14000000 0 1 e023 0 0 0 0 0 0 32 0",
-            "RUN2 1 0001e000 000c0000 14000000 0 1 e023 0 0 0 0 0 0 32 0",
-            "RUN2 1 00000000 000c0000 c0000000 0 1 e023 0 0 0 0 0 0 32 0",
-            "RUN2 1 40000000 000c0000 14000000 0 1 e023 0 0 0 0 0 0 32 0",
-            "RUN2 1 00000000 000c0000 14000000 0 1 001e 0 0 0 0 0 0 32 0",
-            "RUN2 1 00000000 000c0000 14000000 0 2 e023 0 0 0 0 0 0 32 0",
-            "RUN2 1 00000000 000c0000 14000000 0 1 e023 5 1 2 3 4 5 0 0 0 0 0 32 0",
-            "RUN2 1 00000000 000c0000 14000000 0 1 e023 0 0 0 0 0 0 32 0 extra",
-            "RUN2 1 00000000 000c0000 14000000 0 1 e023 0 0 0 0 33 0 32 0",
-            "RUN2 1 00000000 000c0000 14000000 0 1 e023 0 0 0 0 0 80000000 1 0",
-            "RUN2 1 00000000 00040000 14000000 0 1 e023 0 0 0 0 0 00000001 1 0",
+            "RUN2 0 00000000 000c0000 14000000 0 1 e023 0 0 0 0 0 0 32 0 0",
+            "RUN2 1001 00000000 000c0000 14000000 0 1 e023 0 0 0 0 0 0 32 0 0",
+            "RUN2 1 0001e000 000c0000 14000000 0 1 e023 0 0 0 0 0 0 32 0 0",
+            "RUN2 1 00000000 000c0000 c0000000 0 1 e023 0 0 0 0 0 0 32 0 0",
+            "RUN2 1 40000000 000c0000 14000000 0 1 e023 0 0 0 0 0 0 32 0 0",
+            "RUN2 1 00000000 000c0000 14000000 0 1 001e 0 0 0 0 0 0 32 0 0",
+            "RUN2 1 00000000 000c0000 14000000 0 2 e023 0 0 0 0 0 0 32 0 0",
+            "RUN2 1 00000000 000c0000 14000000 0 1 e023 5 1 2 3 4 5 0 0 0 0 0 32 0 0",
+            "RUN2 1 00000000 000c0000 14000000 0 1 e023 0 0 0 0 0 0 32 0 0 extra",
+            "RUN2 1 00000000 000c0000 14000000 0 1 e023 0 0 0 0 33 0 32 0 0",
+            "RUN2 1 00000000 000c0000 14000000 0 1 e023 0 0 0 0 0 80000000 1 0 0",
+            "RUN2 1 00000000 00040000 14000000 0 1 e023 0 0 0 0 0 00000001 1 0 0",
             "RUN1 1 0 0 0 0 0 1 e023",
         ] {
             assert!(Request::parse(line).is_err(), "{line}");

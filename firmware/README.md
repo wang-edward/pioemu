@@ -48,17 +48,17 @@ words are loaded into SM0's TX FIFO before the first tick. Before that, SM0's X,
 ISR, OSR, both shift counts and the IRQ flags are set from the request with injected
 instructions at full speed (autopush/autopull off, then SHIFTCTRL is restored). An
 OSR shift count can only follow shifting, so bits it has shifted out must be zero.
-No external pin stimulus
-is supplied, physical GPIO routing is not configured, and replays assume repeatable
-external inputs.
+The request's `gpio_in` word forces every GPIO input seen by PIO through IO_BANK0
+GPIOn_CTRL.INOVER for the whole request, so no external stimulus is needed. Pin outputs
+are not routed to the pads.
 
 The shared `protocol` crate defines the newline-delimited request:
 
 ```text
-RUN2 ticks execctrl shiftctrl pinctrl origin word_count hex_words... tx_count hex_tx_words... x y isr isr_count osr osr_count irq\n
+RUN2 ticks execctrl shiftctrl pinctrl origin word_count hex_words... tx_count hex_tx_words... x y isr isr_count osr osr_count irq gpio_in\n
 ```
 
-Counts, ticks and the origin are decimal; registers, words and IRQ flags are hexadecimal.
+Counts, ticks and the origin are decimal; registers, words, IRQ flags and `gpio_in` are hexadecimal.
 Wrap and side-set come from EXECCTRL and PINCTRL. Addresses, including JMP targets,
 are absolute. The firmware accepts requests split across USB packets. It responds
 with the CSV header, the requested rows, and `DONE`, or an `ERR message` line, and

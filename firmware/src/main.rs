@@ -77,6 +77,10 @@ fn main() -> ! {
         .unwrap()
         .build();
 
+    peripherals.RESETS.reset().modify(|_, w| w.io_bank0().clear_bit());
+    while peripherals.RESETS.reset_done().read().io_bank0().bit_is_clear() {
+        spin_loop();
+    }
     let registers = unsafe { &*pac::PIO0::ptr() };
     let mut decoder = Decoder::default();
 
@@ -114,6 +118,9 @@ fn main() -> ! {
             send(&mut usb, &mut serial, CSV_HEADER.as_bytes());
             send(&mut usb, &mut serial, b"\r\n");
 
+            for (pin, gpio) in peripherals.IO_BANK0.gpio_iter().take(32).enumerate() {
+                gpio.gpio_ctrl().write(|w| unsafe { w.inover().bits(2 | (request.gpio_in >> pin) as u8 & 1) });
+            }
             for ticks_elapsed in 1..=request.ticks {
                 if !serial.dtr() {
                     break;
@@ -193,6 +200,9 @@ fn main() -> ! {
                 if ticks_elapsed == request.ticks {
                     send(&mut usb, &mut serial, b"DONE\r\n");
                 }
+            }
+            for gpio in peripherals.IO_BANK0.gpio_iter() {
+                gpio.gpio_ctrl().reset();
             }
         }
     }

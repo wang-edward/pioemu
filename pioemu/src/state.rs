@@ -179,7 +179,7 @@ impl StateMachine {
                             wait::Source::Gpio => (gpio_in >> index) & 1,
                             wait::Source::Pin => (pins >> index) & 1,
                             wait::Source::Irq => irq_index.map_or(0, |i| (*irq_flags as u32 >> i) & 1),
-                            wait::Source::JmpPin => (gpio_in >> ((self.config.jmp_pin.value() as u32 + index) % 32)) & 1,
+                            wait::Source::JmpPin => (gpio_in >> ((self.config.jmp_pin.value() as u32 + (index & 3)) % 32)) & 1,
                         } == polarity;
                         if cond_met {
                             if let (wait::Source::Irq, 1, Some(i)) = (source, polarity, irq_index) {
