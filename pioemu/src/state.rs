@@ -18,41 +18,6 @@ impl<const MIN: u8, const MAX: u8> Range<MIN, MAX> {
 }
 type PinRange = Range<0, 31>;
 
-const FIFO_DEPTH: usize = 4;
-#[derive(Debug)]
-pub struct Fifo {
-    data: VecDeque<u32>,
-    depth: usize, // 4 normally, 8 if joined
-}
-
-impl Fifo {
-    fn new(depth: usize) -> Self {
-        Self { data: VecDeque::with_capacity(depth), depth }
-    }
-    fn is_full(&self) -> bool {
-        self.data.len() >= self.depth
-    }
-    fn is_empty(&self) -> bool {
-        self.data.is_empty()
-    }
-    pub fn push(&mut self, val: u32) -> bool {
-        if self.is_full() {
-            return false;
-        }
-        self.data.push_back(val);
-        true
-    }
-    fn pop(&mut self) -> Option<u32> {
-        self.data.pop_front()
-    }
-    pub fn len(&self) -> usize {
-        self.data.len()
-    }
-    pub fn iter(&self) -> impl Iterator<Item = &u32> {
-        self.data.iter()
-    }
-}
-
 #[derive(Debug)]
 pub struct Block {
     pub instr_mem: [Option<Instr>; 32],
@@ -149,6 +114,14 @@ pub fn sat_shr(x: u32, n: u8) -> u32 {
 }
 
 impl StateMachine {
+    pub fn write_tx(&mut self, word: u32) {
+        if self.state.tx_fifo.len() < self.config.tx_depth {
+            self.state.tx_fifo.push_back(word);
+        } else {
+            self.state.tx_over = true;
+        }
+    }
+
     // TODO function for gpio in / out mapping
     fn execute(&mut self, instr: &Instr, gpio_out: &mut u32, gpio_dir: &mut u32, gpio_in: u32, irq_flags: &mut u8, sm_id: u8) {
         let threshold = self.config.calc_pull_thresh();
@@ -233,7 +206,8 @@ impl StateMachine {
                         };
                         let isr_shift_count = cmp::min(63, self.state.isr_shift_count + bit_count);
                         if self.config.autopush && isr_shift_count >= self.config.calc_push_thresh() {
-                            if self.state.rx_fifo.push(isr) {
+                            if self.state.rx_fifo.len() < self.config.rx_depth {
+                                self.state.rx_fifo.push_back(isr);
                                 self.state.isr = 0;
                                 self.state.isr_shift_count = 0;
                             } else {
@@ -292,7 +266,10 @@ impl StateMachine {
                         let (if_full, block) = (if_full.value() == 1, block.value() == 1);
                         let should_push = !if_full || (self.state.isr_shift_count >= self.config.calc_push_thresh());
                         if should_push {
-                            let pushed = self.state.rx_fifo.push(self.state.isr);
+                            let pushed = self.state.rx_fifo.len() < self.config.rx_depth;
+                            if pushed {
+                                self.state.rx_fifo.push_back(self.state.isr);
+                            }
                             self.state.rx_stalled |= !pushed;
                             if pushed || !block {
                                 self.state.isr = 0;
@@ -308,7 +285,7 @@ impl StateMachine {
                         let should_pull = !(self.config.autopull && self.state.osr_shift_count == 0)
                             && (!if_empty || self.state.osr_shift_count >= self.config.calc_pull_thresh());
                         if should_pull {
-                            match (self.state.tx_fifo.pop(), block) {
+                            match (self.state.tx_fifo.pop_front(), block) {
                                 (Some(word), _) => {
                                     self.state.osr = word;
                                     self.state.osr_shift_count = 0;
@@ -427,7 +404,7 @@ impl StateMachine {
         }
         let count = self.state.osr_shift_count;
         if self.config.autopull && (was_empty && count >= threshold || count == threshold) && !self.state.tx_fifo.is_empty() {
-            self.state.osr = self.state.tx_fifo.pop().expect("tx fifo empty when it shouldn't be");
+            self.state.osr = self.state.tx_fifo.pop_front().expect("tx fifo empty when it shouldn't be");
             self.state.osr_shift_count = 0;
         }
     }
@@ -443,12 +420,13 @@ pub struct State {
     pub osr: u32,
     pub isr_shift_count: u8,
     pub osr_shift_count: u8,
-    pub tx_fifo: Fifo,
-    pub rx_fifo: Fifo,
+    pub tx_fifo: VecDeque<u32>,
+    pub rx_fifo: VecDeque<u32>,
     pub delay_counter: u8,
     pub stalled: bool,
     pub tx_stalled: bool,
     pub rx_stalled: bool,
+    pub tx_over: bool,
     last_pin_write: Option<(bool, u32, u8, u8)>,
     irq_wait: Option<u8>,
     exec: Option<u16>,
@@ -464,12 +442,13 @@ impl State {
             isr: 0,
             osr_shift_count: 32, // empty at reset
             isr_shift_count: 0,
-            tx_fifo: Fifo::new(FIFO_DEPTH),
-            rx_fifo: Fifo::new(FIFO_DEPTH),
+            tx_fifo: VecDeque::new(),
+            rx_fifo: VecDeque::new(),
             delay_counter: 0,
             stalled: false,
             tx_stalled: false,
             rx_stalled: false,
+            tx_over: false,
             last_pin_write: None,
             irq_wait: None,
             exec: None,
@@ -521,8 +500,8 @@ pub struct Config {
     in_shiftdir: ShiftDir,
     autopull: bool,
     autopush: bool,
-    fjoin_rx: bool,
-    fjoin_tx: bool,
+    tx_depth: usize,
+    rx_depth: usize,
     // TODO clkdiv?
     // clkdiv_int: u16,
     // clkdiv_frac: u8,
@@ -570,8 +549,8 @@ impl Config {
             in_shiftdir: shift_dir(18),
             autopull: field(shiftctrl, 17, 1) == 1,
             autopush: field(shiftctrl, 16, 1) == 1,
-            fjoin_rx: field(shiftctrl, 31, 1) == 1,
-            fjoin_tx: field(shiftctrl, 30, 1) == 1,
+            tx_depth: [4, 8, 0, 0][field(shiftctrl, 30, 2) as usize],
+            rx_depth: [4, 0, 8, 0][field(shiftctrl, 30, 2) as usize],
         }
     }
     fn calc_pull_thresh(&self) -> u8 {

@@ -132,7 +132,7 @@ fn emulate(request: &Request) -> Vec<String> {
     test.config = Config::from_registers(request.execctrl, request.shiftctrl, request.pinctrl);
     test.state.pc = u5::new(request.origin);
     for word in &request.tx[..request.tx_len] {
-        test.state.tx_fifo.push(*word);
+        test.write_tx(*word);
     }
     test.state.x = request.x;
     test.state.y = request.y;
@@ -153,7 +153,10 @@ fn emulate(request: &Request) -> Vec<String> {
                 flevel | (sm.state.tx_fifo.len() as u32) << (8 * i) | (sm.state.rx_fifo.len() as u32) << (8 * i + 4)
             });
             let fdebug = block.sms.iter().enumerate().fold(0, |fdebug, (i, sm)| {
-                fdebug | (sm.state.rx_stalled as u32) << i | (sm.state.tx_stalled as u32) << (24 + i)
+                fdebug
+                    | (sm.state.rx_stalled as u32) << i
+                    | (sm.state.tx_over as u32) << (16 + i)
+                    | (sm.state.tx_stalled as u32) << (24 + i)
             });
             let (test, marker) = (&block.sms[0].state, &block.sms[1].state);
             let mut rx = [0u32; 4];
@@ -249,7 +252,7 @@ fn random_request(rng: &mut Rng) -> Request {
     let side_count = field(6, 0);
     let side_en = if side_count > 0 { field(2, 30) } else { 0 };
     let execctrl = field(32, 0) | field(4, 5) | field(128, 17) | field(32, 24) | wrap_bottom << 7 | wrap_top << 12 | field(2, 29) | side_en;
-    let shiftctrl = field(32, 0) | field(16, 16) | field(32, 20) | field(32, 25);
+    let shiftctrl = field(32, 0) | field(16, 16) | field(32, 20) | field(32, 25) | field(4, 30);
     let pinctrl = field(32, 0) | field(32, 5) | field(32, 10) | field(32, 15) | field(33, 20) | field(6, 26) | side_count << 29;
     let mut request = Request {
         ticks: RANDOM_TICKS,

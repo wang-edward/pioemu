@@ -240,7 +240,7 @@ fn reset_and_initialize(resets: &pac::RESETS, registers: &pac::pio0::RegisterBlo
 fn load_state(registers: &pac::pio0::RegisterBlock, request: &Request) {
     let sm = registers.sm(0);
     sm.sm_clkdiv().write(|w| unsafe { w.bits(1 << 16) });
-    sm.sm_shiftctrl().write(|w| unsafe { w.bits(request.shiftctrl & !(0b11 << 16)) });
+    sm.sm_shiftctrl().write(|w| unsafe { w.bits(request.shiftctrl & !(0b11 << 16 | 0b11 << 30)) });
 
     let (isr, isr_in) = match (request.isr_count, request.in_shift_right()) {
         (0, _) => (request.isr, 0),
@@ -289,7 +289,7 @@ fn extract_hidden_registers(registers: &pac::pio0::RegisterBlock) -> Option<[u32
     registers
         .sm(0)
         .sm_shiftctrl()
-        .modify(|_, w| w.autopush().clear_bit().autopull().clear_bit());
+        .modify(|r, w| unsafe { w.bits(r.bits() & !(0b11 << 16 | 0b11 << 30)) });
 
     // Diagnostic instructions must not apply mandatory side-set to pins.
     registers.sm(0).sm_pinctrl().modify(|_, w| unsafe { w.sideset_count().bits(0) });
