@@ -1,0 +1,39 @@
+name: Line count
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  line-count:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+      - run: curl -sSfL https://github.com/XAMPPRocky/tokei/releases/download/v12.1.2/tokei-x86_64-unknown-linux-gnu.tar.gz | sudo tar xz -C /usr/local/bin
+      - if: github.event_name == 'pull_request'
+        run: git worktree add ../base ${{ github.event.pull_request.base.sha }}
+      - run: |
+          loc() { tokei -o json "$@" | jq .Total.code; }
+          row() {
+            now=$(loc "${@:2}")
+            if [ -d ../base ]; then
+              old=$(cd ../base && mkdir -p "${@:2}" && loc "${@:2}")
+              printf '| %s | %d | %+d |\n' "$1" "$now" "$((now - old))"
+            else
+              printf '| %s | %d |\n' "$1" "$now"
+            fi
+          }
+          {
+            if [ -d ../base ]; then
+              echo '| Crate | Lines | Change |'
+              echo '|---|---:|---:|'
+            else
+              echo '| Crate | Lines |'
+              echo '|---|---:|'
+            fi
+            for crate in pioemu difftest protocol firmware; do row "$crate" "$crate"; done
+            row '**Total**' pioemu difftest protocol firmware
+          } >> "$GITHUB_STEP_SUMMARY"
