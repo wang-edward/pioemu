@@ -26,6 +26,7 @@ pub struct Request {
     pub osr_count: u8,
     pub irq: u8,
     pub gpio_in: u32,
+    pub rx: [u32; 4],
 }
 
 impl Request {
@@ -64,7 +65,7 @@ impl Request {
         if !program.contains(&self.wrap_bottom()) || !program.contains(&self.wrap_top()) {
             return Err("wrap outside program");
         }
-        if self.side_bits() > 5 || (self.side_optional() && self.side_bits() == 0) {
+        if self.side_optional() && self.side_bits() == 0 {
             return Err("invalid side-set");
         }
         // JMPs may target unused slots, but never the clock marker.
@@ -114,11 +115,33 @@ impl Request {
         let osr_count = u8::try_from(number(10)?).map_err(|_| "field out of range")?;
         let irq = u8::try_from(number(16)?).map_err(|_| "field out of range")?;
         let gpio_in = number(16)?;
+        let mut rx = [0; 4];
+        for word in &mut rx {
+            *word = number(16)?;
+        }
         if fields.next().is_some() {
             return Err("extra fields");
         }
-        let request =
-            Self { ticks, execctrl, shiftctrl, pinctrl, origin, len, code, tx_len, tx, x, y, isr, isr_count, osr, osr_count, irq, gpio_in };
+        let request = Self {
+            ticks,
+            execctrl,
+            shiftctrl,
+            pinctrl,
+            origin,
+            len,
+            code,
+            tx_len,
+            tx,
+            x,
+            y,
+            isr,
+            isr_count,
+            osr,
+            osr_count,
+            irq,
+            gpio_in,
+            rx,
+        };
         request.validate()?;
         Ok(request)
     }
@@ -136,11 +159,15 @@ impl Request {
         for word in &self.tx[..self.tx_len] {
             write!(output, " {word:08x}")?;
         }
-        writeln!(
+        write!(
             output,
             " {:08x} {:08x} {:08x} {} {:08x} {} {:02x} {:08x}",
             self.x, self.y, self.isr, self.isr_count, self.osr, self.osr_count, self.irq, self.gpio_in
-        )
+        )?;
+        for word in &self.rx {
+            write!(output, " {word:08x}")?;
+        }
+        writeln!(output)
     }
 }
 
@@ -196,7 +223,7 @@ mod tests {
     #[test]
     fn framing_and_recovery() {
         let line =
-            b"RUN2 16 00002000 000c0000 14000000 0 3 e023 0241 80a0 2 12345678 9abcdef0 00000001 00000002 00000003 4 00000005 6 ff 89abcdef\r\n";
+            b"RUN2 16 00002000 000c0000 14000000 0 3 e023 0241 80a0 2 12345678 9abcdef0 00000001 00000002 00000003 4 00000005 6 ff 89abcdef 0000000a 0000000b 0000000c 0000000d\r\n";
         let mut decoder = Decoder::default();
         for _ in 0..300 {
             assert!(decoder.push(b'x').is_none());
@@ -219,8 +246,7 @@ mod tests {
     }
     #[test]
     fn round_trip() {
-        let line =
-            "RUN2 7 40006200 000f0000 40000000 4 3 f823 0245 80a0 1 deadbeef 00000000 ffffffff 80000000 32 00000000 32 00 00000000\n";
+        let line = "RUN2 7 40006200 000f0000 40000000 4 3 f823 0245 80a0 1 deadbeef 00000000 ffffffff 80000000 32 00000000 32 00 00000000 00000001 00000002 00000003 00000004\n";
         let mut wire = String::new();
         Request::parse(line).unwrap().write(&mut wire).unwrap();
         assert_eq!(wire, line);
@@ -228,18 +254,17 @@ mod tests {
     #[test]
     fn invalid_requests() {
         for line in [
-            "RUN2 0 00000000 000c0000 14000000 0 1 e023 0 0 0 0 0 0 32 0 0",
-            "RUN2 1001 00000000 000c0000 14000000 0 1 e023 0 0 0 0 0 0 32 0 0",
-            "RUN2 1 0001e000 000c0000 14000000 0 1 e023 0 0 0 0 0 0 32 0 0",
-            "RUN2 1 00000000 000c0000 c0000000 0 1 e023 0 0 0 0 0 0 32 0 0",
-            "RUN2 1 40000000 000c0000 14000000 0 1 e023 0 0 0 0 0 0 32 0 0",
-            "RUN2 1 00000000 000c0000 14000000 0 1 001e 0 0 0 0 0 0 32 0 0",
-            "RUN2 1 00000000 000c0000 14000000 0 2 e023 0 0 0 0 0 0 32 0 0",
-            "RUN2 1 00000000 000c0000 14000000 0 1 e023 5 1 2 3 4 5 0 0 0 0 0 32 0 0",
-            "RUN2 1 00000000 000c0000 14000000 0 1 e023 0 0 0 0 0 0 32 0 0 extra",
-            "RUN2 1 00000000 000c0000 14000000 0 1 e023 0 0 0 0 33 0 32 0 0",
-            "RUN2 1 00000000 000c0000 14000000 0 1 e023 0 0 0 0 0 80000000 1 0 0",
-            "RUN2 1 00000000 00040000 14000000 0 1 e023 0 0 0 0 0 00000001 1 0 0",
+            "RUN2 0 00000000 000c0000 14000000 0 1 e023 0 0 0 0 0 0 32 0 0 0 0 0 0",
+            "RUN2 1001 00000000 000c0000 14000000 0 1 e023 0 0 0 0 0 0 32 0 0 0 0 0 0",
+            "RUN2 1 0001e000 000c0000 14000000 0 1 e023 0 0 0 0 0 0 32 0 0 0 0 0 0",
+            "RUN2 1 40000000 000c0000 14000000 0 1 e023 0 0 0 0 0 0 32 0 0 0 0 0 0",
+            "RUN2 1 00000000 000c0000 14000000 0 1 001e 0 0 0 0 0 0 32 0 0 0 0 0 0",
+            "RUN2 1 00000000 000c0000 14000000 0 2 e023 0 0 0 0 0 0 32 0 0 0 0 0 0",
+            "RUN2 1 00000000 000c0000 14000000 0 1 e023 5 1 2 3 4 5 0 0 0 0 0 32 0 0 0 0 0 0",
+            "RUN2 1 00000000 000c0000 14000000 0 1 e023 0 0 0 0 0 0 32 0 0 0 0 0 0 extra",
+            "RUN2 1 00000000 000c0000 14000000 0 1 e023 0 0 0 0 33 0 32 0 0 0 0 0 0",
+            "RUN2 1 00000000 000c0000 14000000 0 1 e023 0 0 0 0 0 80000000 1 0 0 0 0 0 0",
+            "RUN2 1 00000000 00040000 14000000 0 1 e023 0 0 0 0 0 00000001 1 0 0 0 0 0 0",
             "RUN1 1 0 0 0 0 0 1 e023",
         ] {
             assert!(Request::parse(line).is_err(), "{line}");

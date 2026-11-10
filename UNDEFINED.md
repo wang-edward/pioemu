@@ -29,8 +29,8 @@ counts separately. "Hardware" is what difftest observed on a Pico 2.
 | Instructions written to SMx_INSTR "must not stall" when EXEC is used | 11.5.7, p.825 | SMx_INSTR writes are not modelled | not tested |
 | `WAIT 1 IRQ` "should not be used" with IRQ flags routed to the interrupt controller | 11.4.3.2, p.805 | not modelled | not tested |
 | Reading an empty RX FIFO from the system: "data returned ... is undefined" | 11.7 RXF0–3, p.853 | not modelled | not tested |
-| IRQ instruction bit 7 (encoding shows 0) | 11.4.11.1, p.812 | ignored | not tested (difftest never sets it) |
-| SET_COUNT or SIDESET_COUNT above 5 ("in the range 0 to 5") | 11.7 SM0_PINCTRL, p.859 | panics with "value not in range" (not counted as undefined) | not tested |
+| IRQ instruction bit 7 (encoding shows 0) | 11.4.11.1, p.812 | ignored | ignored, with and without Clear and Wait |
+| SET_COUNT or SIDESET_COUNT above 5 ("in the range 0 to 5") | 11.7 SM0_PINCTRL, p.859 | panics | not compared |
 
 ## Defined by the datasheet, but the hardware differs or goes further
 
@@ -40,5 +40,6 @@ counts separately. "Hardware" is what difftest observed on a Pico 2.
 | Autopull refill after an OUT | after an OUT, refill whenever `osr count >= threshold` (RP2040 3.5.4.2, p.339; RP2350 11.5.4.2, p.821) | the refill happens on the same cycle only when the count lands exactly on the threshold (or the OSR was already at or above the threshold before the cycle). If the OUT overshoots the threshold, the refill happens on the next cycle |
 | OUT_STICKY vs side-set | "the side-set takes precedence in the overlapping region" (11.5.6, p.823) | with OUT_STICKY set, the OUT/SET pin write beats side-set |
 | PULL NOBLOCK on an empty TX FIFO | TXSTALL is set only by a blocking PULL or an autopull OUT (11.7 FDEBUG, p.852) | also sets TXSTALL |
-| RX FIFO storage across a PIO reset | not stated | RESETS does not clear the RX storage: after a reset, RXF0_PUTGET0..3 show stale words, so the firmware zeroes them |
+| RX FIFO storage across a PIO reset | not stated | RESETS does not clear the RX storage: after a reset, RXF0_PUTGET0..3 show stale words, so the firmware loads them with the request's RX words |
+| Reading RXF0_PUTGET0..3 in GET-only mode | "Direct read/write access ... if SHIFTCTRL_FJOIN_RX_PUT xor SHIFTCTRL_FJOIN_RX_GET is set" (11.7 RXF0_PUTGET0, p.865) | all four registers return the same stored word, since the state machine owns the single read port; the firmware switches to PUT-only to read the storage |
 | Setting FJOIN_RX_PUT/GET | "will clear the FJOIN_TX and FJOIN_RX bits" (11.7 SM0_SHIFTCTRL, p.857) | confirmed: the TX FIFO stays 4 deep |

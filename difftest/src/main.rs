@@ -153,6 +153,7 @@ fn emulate(request: &Request) -> Vec<String> {
     test.state.isr_shift_count = request.isr_count;
     test.state.osr = request.osr;
     test.state.osr_shift_count = request.osr_count;
+    test.state.rx_putget = request.rx;
     block.irq_flags = request.irq;
     block.gpio_in = request.gpio_in;
     marker.config = Config::from_registers(MARKER_EXECCTRL, 0x000c_0000, 0);
@@ -173,7 +174,7 @@ fn emulate(request: &Request) -> Vec<String> {
                     | (sm.state.tx_stalled as u32) << (24 + i)
             });
             let (test, marker) = (&block.sms[0].state, &block.sms[1].state);
-            let mut rx = test.rx_putget;
+            let mut rx = if request.shiftctrl >> 14 & 3 == 0 { [0; 4] } else { test.rx_putget };
             for (destination, word) in rx.iter_mut().zip(test.rx_fifo.iter()) {
                 *destination = *word;
             }
@@ -243,7 +244,7 @@ fn random_word(rng: &mut Rng, origin: u8, len: usize) -> u16 {
             _ => (4, rng.below(8), rng.below(16)),
         },
         5 => (5, rng.below(8), rng.below(32)),
-        6 => (6, rng.below(4), rng.below(32)),
+        6 => (6, rng.below(8), rng.below(32)),
         _ => (7, rng.below(8), rng.below(32)),
     };
     let delay = if rng.below(2) == 0 { rng.below(32) } else { 0 };
@@ -266,13 +267,14 @@ fn random_request(rng: &mut Rng) -> Request {
     let wrap_top = origin as u32 + rng.below(len as u64) as u32;
     let wrap_bottom = origin as u32 + rng.below(wrap_top as u64 - origin as u64 + 1) as u32;
     let mut field = |values: u64, lsb: u32| (rng.below(values) as u32) << lsb;
-    let side_count = field(6, 0);
+    let side_count = if field(16, 0) == 0 { 6 | field(2, 0) } else { field(6, 0) };
     let side_en = if side_count > 0 { field(2, 30) } else { 0 };
     let execctrl = field(32, 0) | field(4, 5) | field(128, 17) | field(32, 24) | wrap_bottom << 7 | wrap_top << 12 | field(2, 29) | side_en;
     let putget = if field(2, 0) == 0 { field(4, 14) } else { 0 };
     let autopush = if putget == 0 { field(2, 16) } else { 0 };
     let shiftctrl = field(32, 0) | putget | autopush | field(8, 17) | field(32, 20) | field(32, 25) | field(4, 30);
-    let pinctrl = field(32, 0) | field(32, 5) | field(32, 10) | field(32, 15) | field(33, 20) | field(6, 26) | side_count << 29;
+    let set_count = if field(16, 0) == 0 { 6 | field(2, 0) } else { field(6, 0) };
+    let pinctrl = field(32, 0) | field(32, 5) | field(32, 10) | field(32, 15) | field(33, 20) | set_count << 26 | side_count << 29;
     let mut request = Request {
         ticks: RANDOM_TICKS,
         execctrl,
@@ -291,6 +293,7 @@ fn random_request(rng: &mut Rng) -> Request {
         osr_count: rng.below(33) as u8,
         irq: rng.below(256) as u8,
         gpio_in: rng.next() as u32,
+        rx: std::array::from_fn(|_| rng.next() as u32),
     };
     request.osr = osr_reachable(request.osr, request.osr_count, request.out_shift_right());
     for word in &mut request.code[..len] {
@@ -304,7 +307,7 @@ fn random_request(rng: &mut Rng) -> Request {
 
 fn disassemble(request: &Request) -> String {
     let mut text = format!(
-        "  execctrl {:08x}, shiftctrl {:08x}, pinctrl {:08x}, tx {:08x?}\n  x {:08x}, y {:08x}, isr {:08x} ({}), osr {:08x} ({}), irq {:02x}, gpio_in {:08x}\n",
+        "  execctrl {:08x}, shiftctrl {:08x}, pinctrl {:08x}, tx {:08x?}\n  x {:08x}, y {:08x}, isr {:08x} ({}), osr {:08x} ({}), irq {:02x}, gpio_in {:08x}, rx {:08x?}\n",
         request.execctrl,
         request.shiftctrl,
         request.pinctrl,
@@ -316,7 +319,8 @@ fn disassemble(request: &Request) -> String {
         request.osr,
         request.osr_count,
         request.irq,
-        request.gpio_in
+        request.gpio_in,
+        request.rx
     );
     for (slot, word) in (request.origin as usize..).zip(&request.code[..request.len]) {
         text += &format!(
@@ -350,6 +354,7 @@ mod tests {
             osr_count: 32,
             irq: 0,
             gpio_in: 0,
+            rx: [0; 4],
         };
         request.code[..3].copy_from_slice(&[0xf823, 0x0245, 0x80a0]);
         let rows = emulate(&request);
@@ -368,7 +373,9 @@ mod tests {
         for seed in 0..10_000 {
             let request = random_request(&mut Rng(seed));
             request.validate().unwrap();
-            disassemble(&request);
+            if request.side_bits() <= 5 {
+                disassemble(&request);
+            }
         }
     }
 }

@@ -157,6 +157,7 @@ impl Instr {
             }
         };
 
+        assert!(side_bits <= 5, "undefined: SIDESET_COUNT {side_bits} above 5");
         let field = ((word >> 8) & 31) as u8;
         let delay_bits = 5 - side_bits;
         let side = field >> delay_bits;
