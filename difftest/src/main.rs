@@ -266,13 +266,14 @@ fn random_request(rng: &mut Rng) -> Request {
     let wrap_top = origin as u32 + rng.below(len as u64) as u32;
     let wrap_bottom = origin as u32 + rng.below(wrap_top as u64 - origin as u64 + 1) as u32;
     let mut field = |values: u64, lsb: u32| (rng.below(values) as u32) << lsb;
-    let side_count = field(6, 0);
+    let side_count = if field(16, 0) == 0 { 6 | field(2, 0) } else { field(6, 0) };
     let side_en = if side_count > 0 { field(2, 30) } else { 0 };
     let execctrl = field(32, 0) | field(4, 5) | field(128, 17) | field(32, 24) | wrap_bottom << 7 | wrap_top << 12 | field(2, 29) | side_en;
     let putget = if field(2, 0) == 0 { field(4, 14) } else { 0 };
     let autopush = if putget == 0 { field(2, 16) } else { 0 };
     let shiftctrl = field(32, 0) | putget | autopush | field(8, 17) | field(32, 20) | field(32, 25) | field(4, 30);
-    let pinctrl = field(32, 0) | field(32, 5) | field(32, 10) | field(32, 15) | field(33, 20) | field(6, 26) | side_count << 29;
+    let set_count = if field(16, 0) == 0 { 6 | field(2, 0) } else { field(6, 0) };
+    let pinctrl = field(32, 0) | field(32, 5) | field(32, 10) | field(32, 15) | field(33, 20) | set_count << 26 | side_count << 29;
     let mut request = Request {
         ticks: RANDOM_TICKS,
         execctrl,
@@ -368,7 +369,9 @@ mod tests {
         for seed in 0..10_000 {
             let request = random_request(&mut Rng(seed));
             request.validate().unwrap();
-            disassemble(&request);
+            if request.side_bits() <= 5 {
+                disassemble(&request);
+            }
         }
     }
 }

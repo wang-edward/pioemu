@@ -30,7 +30,7 @@ counts separately. "Hardware" is what difftest observed on a Pico 2.
 | `WAIT 1 IRQ` "should not be used" with IRQ flags routed to the interrupt controller | 11.4.3.2, p.805 | not modelled | not tested |
 | Reading an empty RX FIFO from the system: "data returned ... is undefined" | 11.7 RXF0–3, p.853 | not modelled | not tested |
 | IRQ instruction bit 7 (encoding shows 0) | 11.4.11.1, p.812 | ignored | not tested (difftest never sets it) |
-| SET_COUNT or SIDESET_COUNT above 5 ("in the range 0 to 5") | 11.7 SM0_PINCTRL, p.859 | panics with "value not in range" (not counted as undefined) | not tested |
+| SET_COUNT or SIDESET_COUNT above 5 ("in the range 0 to 5") | 11.7 SM0_PINCTRL, p.859 | panics | not compared |
 
 ## Defined by the datasheet, but the hardware differs or goes further
 

@@ -64,7 +64,7 @@ impl Request {
         if !program.contains(&self.wrap_bottom()) || !program.contains(&self.wrap_top()) {
             return Err("wrap outside program");
         }
-        if self.side_bits() > 5 || (self.side_optional() && self.side_bits() == 0) {
+        if self.side_optional() && self.side_bits() == 0 {
             return Err("invalid side-set");
         }
         // JMPs may target unused slots, but never the clock marker.
@@ -231,7 +231,6 @@ mod tests {
             "RUN2 0 00000000 000c0000 14000000 0 1 e023 0 0 0 0 0 0 32 0 0",
             "RUN2 1001 00000000 000c0000 14000000 0 1 e023 0 0 0 0 0 0 32 0 0",
             "RUN2 1 0001e000 000c0000 14000000 0 1 e023 0 0 0 0 0 0 32 0 0",
-            "RUN2 1 00000000 000c0000 c0000000 0 1 e023 0 0 0 0 0 0 32 0 0",
             "RUN2 1 40000000 000c0000 14000000 0 1 e023 0 0 0 0 0 0 32 0 0",
             "RUN2 1 00000000 000c0000 14000000 0 1 001e 0 0 0 0 0 0 32 0 0",
             "RUN2 1 00000000 000c0000 14000000 0 2 e023 0 0 0 0 0 0 32 0 0",

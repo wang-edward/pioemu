@@ -8,7 +8,7 @@ struct Range<const MIN: u8, const MAX: u8>(u8);
 
 impl<const MIN: u8, const MAX: u8> Range<MIN, MAX> {
     fn new(val: u8) -> Self {
-        assert!(val >= MIN && val <= MAX, "value {val} not in [{MIN}, {MAX}]");
+        assert!(val >= MIN && val <= MAX, "undefined: value {val} not in [{MIN}, {MAX}]");
         Self(val)
     }
 
