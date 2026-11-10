@@ -222,7 +222,13 @@ impl StateMachine {
                                 self.config.rx_get,
                                 self.state.rx_fifo.len() < self.config.rx_depth,
                             ) {
-                                (true, _, _) => self.state.rx_putget[0] = isr,
+                                (true, _, _) => {
+                                    self.state.rx_putget[if bit_count & 8 == 0 {
+                                        self.state.y as usize & 3
+                                    } else {
+                                        bit_count as usize & 3
+                                    }] = isr
+                                }
                                 (false, true, _) => (),
                                 (false, false, true) => self.state.rx_fifo.push_back(isr),
                                 (false, false, false) => {
@@ -282,11 +288,17 @@ impl StateMachine {
                             self.state.osr_shift_count = cmp::min(32, self.state.osr_shift_count + bit_count);
                         }
                     }
-                    Instruction::Push { if_full, block } => {
-                        assert!(!self.config.strict || !self.config.rx_put, "undefined: push_rx_put");
-                        assert!(!self.config.strict || !self.config.rx_get, "undefined: push_rx_get");
+                    Instruction::Push { if_full, block, index } | Instruction::MovToRx { if_full, block, index } => {
+                        let put = matches!(instr.instruction, Instruction::MovToRx { .. });
+                        match (put, self.config.rx_put, self.config.rx_get) {
+                            (false, true, _) => assert!(!self.config.strict, "undefined: push_rx_put"),
+                            (false, false, true) => assert!(!self.config.strict, "undefined: push_rx_get"),
+                            (true, false, true) => assert!(!self.config.strict, "undefined: mov_rxfifo_isr_get_only"),
+                            (true, false, false) => assert!(!self.config.strict, "undefined: mov_rxfifo_isr_no_join"),
+                            _ => (),
+                        }
                         let (if_full, block) = (if_full.value() == 1, block.value() == 1);
-                        let should_push = !if_full || (self.state.isr_shift_count >= self.config.calc_push_thresh());
+                        let should_push = put || !if_full || self.state.isr_shift_count >= self.config.calc_push_thresh();
                         if should_push {
                             let pushed = match (
                                 self.config.rx_put,
@@ -294,7 +306,7 @@ impl StateMachine {
                                 self.state.rx_fifo.len() < self.config.rx_depth,
                             ) {
                                 (true, _, _) => {
-                                    self.state.rx_putget[self.state.y as usize & 3] = self.state.isr;
+                                    self.state.rx_putget[index.map_or(self.state.y as usize & 3, |i| i.value() as usize)] = self.state.isr;
                                     true
                                 }
                                 (false, true, _) => true,
@@ -305,11 +317,13 @@ impl StateMachine {
                                 (false, false, false) => false,
                             };
                             self.state.rx_stalled |= !pushed;
-                            if pushed || !block {
-                                self.state.isr = 0;
-                                self.state.isr_shift_count = 0;
-                            } else {
-                                self.state.stalled = true;
+                            match (pushed || !block, put) {
+                                (true, false) => {
+                                    self.state.isr = 0;
+                                    self.state.isr_shift_count = 0;
+                                }
+                                (true, true) => (),
+                                (false, _) => self.state.stalled = true,
                             }
                         }
                     }
@@ -336,31 +350,22 @@ impl StateMachine {
                             }
                         }
                     }
-                    Instruction::MovToRx { index } => {
-                        match (
-                            self.config.rx_put,
-                            self.config.rx_get,
-                            self.state.rx_fifo.len() < self.config.rx_depth,
-                        ) {
-                            (true, _, _) => {
-                                self.state.rx_putget[index.map_or(self.state.y as usize & 3, |i| i.value() as usize)] = self.state.isr
-                            }
-                            (false, true, _) => assert!(!self.config.strict, "undefined: mov_rxfifo_isr_get_only"),
-                            (false, false, room) => {
-                                assert!(!self.config.strict, "undefined: mov_rxfifo_isr_no_join");
-                                if room {
-                                    self.state.rx_fifo.push_back(self.state.isr);
-                                }
-                                self.state.rx_stalled |= !room;
-                            }
-                        }
-                    }
                     Instruction::MovFromRx { if_empty, block, index } => {
-                        assert!(
-                            !self.config.strict || self.config.rx_get || self.config.rx_put,
-                            "undefined: mov_osr_rxfifo_no_join"
-                        );
-                        assert!(!self.config.strict || self.config.rx_get, "undefined: mov_osr_rxfifo_put_only");
+                        let data = match (self.config.rx_get, self.config.rx_put, self.config.rx_depth) {
+                            (true, _, _) => self.state.rx_putget[index.map_or(self.state.y as usize & 3, |i| i.value() as usize)],
+                            (false, true, _) => {
+                                assert!(!self.config.strict, "undefined: mov_osr_rxfifo_put_only");
+                                self.state.rx_putget[1]
+                            }
+                            (false, false, 0) => {
+                                assert!(!self.config.strict, "undefined: mov_osr_rxfifo_tx_joined");
+                                self.state.tx_fifo.front().copied().unwrap_or(self.state.rx_putget[0])
+                            }
+                            (false, false, _) => {
+                                assert!(!self.config.strict, "undefined: mov_osr_rxfifo_no_join");
+                                self.state.rx_fifo.front().copied().unwrap_or(self.state.rx_putget[0])
+                            }
+                        };
                         let pull = !(self.config.autopull && self.state.osr_shift_count == 0)
                             && (if_empty.value() == 0 || self.state.osr_shift_count >= self.config.calc_pull_thresh());
                         if pull && self.state.tx_fifo.pop_front().is_none() {
@@ -368,10 +373,7 @@ impl StateMachine {
                             self.state.stalled = block.value() == 1;
                         }
                         if !self.state.stalled {
-                            self.state.osr = self.state.rx_putget[match self.config.rx_get {
-                                true => index.map_or(self.state.y as usize & 3, |i| i.value() as usize),
-                                false => self.config.rx_put as usize,
-                            }];
+                            self.state.osr = data;
                             self.state.osr_shift_count = 0;
                         }
                     }
@@ -455,7 +457,8 @@ impl StateMachine {
                     Instruction::Set { destn, data } => match destn {
                         set::Destn::Pins | set::Destn::PinDirs => {
                             let dirs = matches!(destn, set::Destn::PinDirs);
-                            let write = (dirs, data.value() as u32, self.config.set_base.get(), self.config.set_count.get());
+                            let data = self.state.last_pin_write.map_or(0, |write| write.1) & !31 | data.value() as u32;
+                            let write = (dirs, data, self.config.set_base.get(), self.config.set_count.get());
                             self.state.last_pin_write = Some(write);
                             wrote_pins = true;
                         }
@@ -472,9 +475,14 @@ impl StateMachine {
                 }
 
                 let side_count = self.config.sideset_count.get() - self.config.sideset_en as u8;
-                let side_write = instr
-                    .side_set
-                    .map(|value| (self.config.side_pindir, value as u32, self.config.sideset_base.get(), side_count));
+                let side_write = instr.side_set.map(|value| {
+                    (
+                        self.config.side_pindir,
+                        value.value() as u32,
+                        self.config.sideset_base.get(),
+                        side_count,
+                    )
+                });
                 let pin_write = self.state.last_pin_write.filter(|_| wrote_pins || self.config.out_sticky);
                 let writes = if self.config.out_sticky {
                     [side_write, pin_write]
@@ -574,11 +582,11 @@ pub struct Config {
     out_base: PinRange,
     out_count: Range<0, 32>,
     set_base: PinRange,
-    set_count: Range<0, 5>,
+    set_count: Range<0, 7>,
     in_base: PinRange,
     in_count: Range<1, 32>,
     sideset_base: PinRange,
-    sideset_count: Range<0, 7>,
+    sideset_count: Range<0, 5>,
 
     // execctrl
     sideset_en: bool,
@@ -644,11 +652,11 @@ impl Config {
             out_base: Range::new(field(pinctrl, 0, 5)),
             out_count: Range::new(cmp::min(32, field(pinctrl, 20, 6))),
             set_base: Range::new(field(pinctrl, 5, 5)),
-            set_count: Range::new(cmp::min(5, field(pinctrl, 26, 3))),
+            set_count: Range::new(field(pinctrl, 26, 3)),
             in_base: Range::new(field(pinctrl, 15, 5)),
             in_count: Range::new(if field(shiftctrl, 0, 5) == 0 { 32 } else { field(shiftctrl, 0, 5) }),
-            sideset_base: Range::new(field(pinctrl, 10, 5)),
-            sideset_count: Range::new(field(pinctrl, 29, 3)),
+            sideset_base: Range::new((field(pinctrl, 10, 5) + field(pinctrl, 29, 3).saturating_sub(5)) % 32),
+            sideset_count: Range::new(cmp::min(5, field(pinctrl, 29, 3))),
             sideset_en: field(execctrl, 30, 1) == 1,
             side_pindir: field(execctrl, 29, 1) == 1,
             jmp_pin: u5::new(field(execctrl, 24, 5)),

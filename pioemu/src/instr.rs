@@ -57,12 +57,15 @@ pub enum Instruction {
     Push {
         if_full: u1,
         block: u1,
+        index: Option<u2>,
     },
     Pull {
         if_empty: u1,
         block: u1,
     },
     MovToRx {
+        if_full: u1,
+        block: u1,
         index: Option<u2>,
     },
     MovFromRx {
@@ -90,7 +93,7 @@ pub enum Instruction {
 pub struct Instr {
     pub instruction: Instruction,
     pub delay: u5,
-    pub side_set: Option<u8>,
+    pub side_set: Option<u5>,
 }
 
 impl Instr {
@@ -119,7 +122,7 @@ impl Instr {
                 match (b >> 4, a & 4, b & 0x0f) {
                     (0, 0, _) => {
                         assert!(!strict || b == 0, "undefined: push_low_bits");
-                        Instruction::Push { if_full: bit(1), block: bit(0) }
+                        Instruction::Push { if_full: bit(1), block: bit(0), index }
                     }
                     (0, _, _) => {
                         assert!(!strict || b == 0, "undefined: pull_low_bits");
@@ -129,7 +132,7 @@ impl Instr {
                     (_, _, 1..8) if strict => panic!("undefined: get_y_index_nonzero"),
                     (_, 0, _) => {
                         assert!(!strict || a == 0, "undefined: put_bits_6_5");
-                        Instruction::MovToRx { index }
+                        Instruction::MovToRx { if_full: bit(1), block: bit(0), index }
                     }
                     _ => {
                         assert!(!strict || a == 4, "undefined: get_bits_6_5");
@@ -173,15 +176,17 @@ impl Instr {
             }
         };
 
+        let side_bits = side_bits.min(5);
         let field = ((word >> 8) & 31) as u8;
-        let side = ((field as u16) << side_bits >> 5) as u8;
+        let delay_bits = 5 - side_bits;
+        let side = field >> delay_bits;
         let side_set = match (side_bits, side_optional) {
             (0, _) => None,
             (_, true) if side >> (side_bits - 1) == 0 => None,
             (_, true) => Some(side & !(1 << (side_bits - 1))),
             _ => Some(side),
         };
-        Self { instruction, delay: u5::new(field & (31 >> side_bits)), side_set }
+        Self { instruction, delay: u5::new(field & ((1 << delay_bits) - 1)), side_set: side_set.map(u5::new) }
     }
 }
 
@@ -234,7 +239,7 @@ impl fmt::Display for Instruction {
                 let n = if bit_count.value() == 0 { 32 } else { bit_count.value() as u32 };
                 write!(f, "out {}, {}", dst, n)
             }
-            Instruction::Push { if_full, block } => {
+            Instruction::Push { if_full, block, .. } => {
                 let iffull = if if_full.value() == 1 { " iffull" } else { "" };
                 let blk = if block.value() == 0 { " noblock" } else { "" };
                 write!(f, "push{}{}", iffull, blk)
@@ -244,7 +249,7 @@ impl fmt::Display for Instruction {
                 let blk = if block.value() == 0 { " noblock" } else { "" };
                 write!(f, "pull{}{}", ifempty, blk)
             }
-            Instruction::MovToRx { index } => match index {
+            Instruction::MovToRx { index, .. } => match index {
                 Some(index) => write!(f, "mov rxfifo[{}], isr", index.value()),
                 None => write!(f, "mov rxfifo[y], isr"),
             },
@@ -308,7 +313,7 @@ impl fmt::Display for Instr {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{}", self.instruction)?;
         if let Some(ss) = self.side_set {
-            write!(f, " side {ss}")?;
+            write!(f, " side {}", ss.value())?;
         }
         if self.delay.value() > 0 {
             write!(f, " [{}]", self.delay.value())?;

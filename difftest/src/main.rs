@@ -349,6 +349,9 @@ fn random_request(rng: &mut Rng) -> Request {
     request.osr = osr_reachable(request.osr, request.osr_count, request.out_shift_right());
     for word in &mut request.code[..len] {
         *word = random_word(rng, origin, len);
+        if *word >> 13 == 4 && *word & 0x90 == 0x90 && shiftctrl & (1 << 30 | 3 << 14) == 1 << 30 {
+            *word &= !0x10;
+        }
     }
     for word in &mut request.tx[..request.tx_len] {
         *word = random_value(rng, origin, len);
