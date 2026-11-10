@@ -2,7 +2,7 @@
 
 Sources: RP2350 datasheet chapter 11 (PIO); page numbers are the printed page numbers.
 "panics" means the emulator panics with a message starting `undefined`, which difftest
-counts separately. "Hardware" is what difftest observed on a Pico 2.
+counts separately. "Hardware" is what difftest observed on a Pico 2 (RP2350 A2, QFN60).
 
 Each row names its regression case in `difftest/src/cases.rs`. The hardware trace of every case is
 checked in as `difftest/cases/<case>.csv`; `cargo run -q -p difftest -- record-cases` rerecords them on
