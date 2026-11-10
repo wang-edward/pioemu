@@ -1,4 +1,4 @@
-use arbitrary_int::{u1, u5};
+use arbitrary_int::{u1, u2, u5};
 use std::fmt;
 
 #[derive(Clone, Copy, Debug)]
@@ -8,7 +8,7 @@ pub enum Condition { Always, XZero, XDec, YZero, YDec, XNeqY, Pin, OsrNotEmpty }
 #[rustfmt::skip]
 pub mod wait {
     #[derive(Clone, Copy, Debug)]
-    pub enum Source { Gpio, Pin, Irq, Reserved }
+    pub enum Source { Gpio, Pin, Irq, JmpPin }
 }
 
 #[rustfmt::skip]
@@ -22,7 +22,7 @@ pub mod shift {
 #[rustfmt::skip]
 pub mod mov {
     #[derive(Clone, Copy, Debug)]
-    pub enum Destn { Pins, X, Y, Reserved, Exec, Pc, Isr, Osr }
+    pub enum Destn { Pins, X, Y, PinDirs, Exec, Pc, Isr, Osr }
     #[derive(Clone, Copy, Debug)]
     pub enum Op { None, Invert, BitReverse, Reserved }
     #[derive(Clone, Copy, Debug)]
@@ -62,6 +62,14 @@ pub enum Instruction {
         if_empty: u1,
         block: u1,
     },
+    MovToRx {
+        index: Option<u2>,
+    },
+    MovFromRx {
+        if_empty: u1,
+        block: u1,
+        index: Option<u2>,
+    },
     Mov {
         destn: mov::Destn,
         op: mov::Op,
@@ -83,7 +91,6 @@ pub struct Instr {
     pub instruction: Instruction,
     pub delay: u5,
     pub side_set: Option<u5>,
-    // TODO something about delay and side_set sharing bits
 }
 
 impl Instr {
@@ -97,7 +104,7 @@ impl Instr {
             }
             1 => {
                 use wait::Source::*;
-                Instruction::Wait { polarity: bit(2), source: [Gpio, Pin, Irq, Reserved][a & 3], index: u5::new(b) }
+                Instruction::Wait { polarity: bit(2), source: [Gpio, Pin, Irq, JmpPin][a & 3], index: u5::new(b) }
             }
             2 => {
                 use shift::Source::*;
@@ -108,11 +115,13 @@ impl Instr {
                 Instruction::Out { destn: [Pins, X, Y, Null, PinDirs, Pc, Isr, Exec][a], bit_count: u5::new(b) }
             }
             4 => {
-                assert!(b == 0, "unsupported PUSH/PULL encoding {word:04x}");
-                if a & 4 == 0 {
-                    Instruction::Push { if_full: bit(1), block: bit(0) }
-                } else {
-                    Instruction::Pull { if_empty: bit(1), block: bit(0) }
+                let index = (b >> 3 & 1 == 1).then(|| u2::new(b & 3));
+                match (b >> 4, a & 4, b & 0x0f) {
+                    (0, 0, _) => Instruction::Push { if_full: bit(1), block: bit(0) },
+                    (0, _, _) => Instruction::Pull { if_empty: bit(1), block: bit(0) },
+                    (_, _, 1..8) => panic!("undefined: {word:04x} indexes the RX FIFO by Y with a nonzero index"),
+                    (_, 0, _) => Instruction::MovToRx { index },
+                    _ => Instruction::MovFromRx { if_empty: bit(1), block: bit(0), index },
                 }
             }
             5 => {
@@ -122,7 +131,7 @@ impl Instr {
                         Destn::Pins,
                         Destn::X,
                         Destn::Y,
-                        Destn::Reserved,
+                        Destn::PinDirs,
                         Destn::Exec,
                         Destn::Pc,
                         Destn::Isr,
@@ -179,7 +188,7 @@ impl fmt::Display for Instruction {
                     wait::Source::Gpio => "gpio",
                     wait::Source::Pin => "pin",
                     wait::Source::Irq => "irq",
-                    wait::Source::Reserved => "???",
+                    wait::Source::JmpPin => "jmppin",
                 };
                 write!(f, "wait {} {} {}", polarity.value(), src, index.value())
             }
@@ -220,16 +229,24 @@ impl fmt::Display for Instruction {
                 let blk = if block.value() == 0 { " noblock" } else { "" };
                 write!(f, "pull{}{}", ifempty, blk)
             }
+            Instruction::MovToRx { index } => match index {
+                Some(index) => write!(f, "mov rxfifo[{}], isr", index.value()),
+                None => write!(f, "mov rxfifo[y], isr"),
+            },
+            Instruction::MovFromRx { index, .. } => match index {
+                Some(index) => write!(f, "mov osr, rxfifo[{}]", index.value()),
+                None => write!(f, "mov osr, rxfifo[y]"),
+            },
             Instruction::Mov { destn, op, source } => {
                 let dst = match destn {
                     mov::Destn::Pins => "pins",
                     mov::Destn::X => "x",
                     mov::Destn::Y => "y",
+                    mov::Destn::PinDirs => "pindirs",
                     mov::Destn::Exec => "exec",
                     mov::Destn::Pc => "pc",
                     mov::Destn::Isr => "isr",
                     mov::Destn::Osr => "osr",
-                    _ => "???",
                 };
                 let src = match source {
                     mov::Source::Pins => "pins",
