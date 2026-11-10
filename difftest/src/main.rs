@@ -153,6 +153,7 @@ fn emulate(request: &Request) -> Vec<String> {
     test.state.isr_shift_count = request.isr_count;
     test.state.osr = request.osr;
     test.state.osr_shift_count = request.osr_count;
+    test.state.rx_putget = request.rx;
     block.irq_flags = request.irq;
     block.gpio_in = request.gpio_in;
     marker.config = Config::from_registers(MARKER_EXECCTRL, 0x000c_0000, 0);
@@ -173,7 +174,7 @@ fn emulate(request: &Request) -> Vec<String> {
                     | (sm.state.tx_stalled as u32) << (24 + i)
             });
             let (test, marker) = (&block.sms[0].state, &block.sms[1].state);
-            let mut rx = test.rx_putget;
+            let mut rx = if request.shiftctrl >> 14 & 3 == 0 { [0; 4] } else { test.rx_putget };
             for (destination, word) in rx.iter_mut().zip(test.rx_fifo.iter()) {
                 *destination = *word;
             }
@@ -292,6 +293,7 @@ fn random_request(rng: &mut Rng) -> Request {
         osr_count: rng.below(33) as u8,
         irq: rng.below(256) as u8,
         gpio_in: rng.next() as u32,
+        rx: std::array::from_fn(|_| rng.next() as u32),
     };
     request.osr = osr_reachable(request.osr, request.osr_count, request.out_shift_right());
     for word in &mut request.code[..len] {
@@ -305,7 +307,7 @@ fn random_request(rng: &mut Rng) -> Request {
 
 fn disassemble(request: &Request) -> String {
     let mut text = format!(
-        "  execctrl {:08x}, shiftctrl {:08x}, pinctrl {:08x}, tx {:08x?}\n  x {:08x}, y {:08x}, isr {:08x} ({}), osr {:08x} ({}), irq {:02x}, gpio_in {:08x}\n",
+        "  execctrl {:08x}, shiftctrl {:08x}, pinctrl {:08x}, tx {:08x?}\n  x {:08x}, y {:08x}, isr {:08x} ({}), osr {:08x} ({}), irq {:02x}, gpio_in {:08x}, rx {:08x?}\n",
         request.execctrl,
         request.shiftctrl,
         request.pinctrl,
@@ -317,7 +319,8 @@ fn disassemble(request: &Request) -> String {
         request.osr,
         request.osr_count,
         request.irq,
-        request.gpio_in
+        request.gpio_in,
+        request.rx
     );
     for (slot, word) in (request.origin as usize..).zip(&request.code[..request.len]) {
         text += &format!(
@@ -351,6 +354,7 @@ mod tests {
             osr_count: 32,
             irq: 0,
             gpio_in: 0,
+            rx: [0; 4],
         };
         request.code[..3].copy_from_slice(&[0xf823, 0x0245, 0x80a0]);
         let rows = emulate(&request);

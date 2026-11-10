@@ -159,8 +159,8 @@ fn main() -> ! {
                 };
 
                 let putget = registers.sm(0).sm_shiftctrl().read().bits() >> 14 & 3;
-                if putget == 3 {
-                    registers.sm(0).sm_shiftctrl().modify(|r, w| unsafe { w.bits(r.bits() & !(1 << 14)) });
+                if putget != 0 {
+                    registers.sm(0).sm_shiftctrl().modify(|r, w| unsafe { w.bits(r.bits() & !(1 << 14) | 1 << 15) });
                 }
                 let mut rx_words = [0u32; 4];
                 if putget != 0 {
@@ -232,7 +232,7 @@ fn reset_and_initialize(resets: &pac::RESETS, registers: &pac::pio0::RegisterBlo
 
     registers.sm(0).sm_shiftctrl().write(|w| unsafe { w.bits(1 << 14) });
     for index in 0..4 {
-        registers.rxf0_putget(index).write(|w| unsafe { w.bits(0) });
+        registers.rxf0_putget(index).write(|w| unsafe { w.bits(request.rx[index]) });
     }
 
     let configs = [
