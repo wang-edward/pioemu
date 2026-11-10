@@ -8,6 +8,8 @@ use pioemu::state::{Block, Config};
 use pioemu_protocol::{CSV_HEADER, MAX_TX, MAX_WORDS, Request, osr_reachable};
 use serialport::{SerialPort, SerialPortType};
 
+mod cases;
+
 const RANDOM_TICKS: u32 = 32;
 const RANDOM_MAX_LEN: u64 = 8;
 const MARKER_NOP: u16 = 0xa042;
@@ -22,6 +24,16 @@ fn main() -> Result<(), Box<dyn Error>> {
             Ok(())
         }
         ["sweep", state] => run(sweep(state.parse()?)),
+        ["record-cases"] => {
+            let mut hardware = Hardware::open()?;
+            for (name, _, request) in cases::cases() {
+                let mut fixture = String::new();
+                request.write(&mut fixture)?;
+                fixture += &format!("{CSV_HEADER}\n{}\n", hardware.run(&request)?.join("\n"));
+                std::fs::write(format!("{}/cases/{name}.csv", env!("CARGO_MANIFEST_DIR")), fixture)?;
+            }
+            Ok(())
+        }
         [count] | [count, _] => {
             let seed = match args.get(1) {
                 Some(seed) => seed.parse()?,
@@ -32,7 +44,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 .collect())
         }
         _ => Err(format!(
-            "usage: difftest <count> [seed] | difftest sweep <0..{}> | difftest bootsel",
+            "usage: difftest <count> [seed] | difftest sweep <0..{}> | difftest record-cases | difftest bootsel",
             SWEEP_STATES.len() - 1
         )
         .into()),
@@ -509,6 +521,29 @@ mod tests {
         assert_eq!((field(10, "test_pc"), field(10, "x")), ("5".into(), "00000000".into()));
         assert_eq!((field(11, "test_pc"), field(11, "x")), ("6".into(), "ffffffff".into()));
         assert_eq!(field(16, "test_pc"), "6");
+    }
+    #[test]
+    fn cases_match_fixtures() {
+        let failures: Vec<String> = cases::cases()
+            .into_iter()
+            .filter_map(|(name, expect, request)| {
+                let fixture = std::fs::read_to_string(format!("{}/cases/{name}.csv", env!("CARGO_MANIFEST_DIR"))).unwrap();
+                let mut wire = String::new();
+                request.write(&mut wire).unwrap();
+                let lines: Vec<String> = fixture.lines().map(str::to_owned).collect();
+                assert_eq!(lines[..2], [wire.trim_end(), CSV_HEADER], "{name}: re-run record-cases");
+                let difference = match std::panic::catch_unwind(|| emulate(&request)) {
+                    Ok(emulator) => first_difference(&lines[2..], &emulator),
+                    Err(_) => Some("emulator panicked".into()),
+                };
+                match (expect, difference) {
+                    (cases::Expect::Pass, Some(difference)) => Some(format!("{name}: {difference}")),
+                    (cases::Expect::Xfail, None) => Some(format!("{name}: matches hardware now, flip it to Pass")),
+                    _ => None,
+                }
+            })
+            .collect();
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
     #[test]
     fn random_requests_are_valid() {
