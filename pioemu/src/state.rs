@@ -21,12 +21,11 @@ type PinRange = Range<0, 31>;
 
 #[derive(Debug)]
 pub struct Block {
-    pub instr_mem: [Option<Instr>; 32],
+    pub instr_mem: [u16; 32],
     pub sms: [StateMachine; 4],
-    pub gpio_out: u32,
-    pub gpio_dir: u32,
+    pads: [u32; 2],
     pub gpio_in: u32,
-    pub irq_flags: u8,
+    pub irq_flags: u32,
     cycle: u64,
     strict: bool,
 }
@@ -34,17 +33,16 @@ pub struct Block {
 impl Block {
     pub fn new(strict: bool) -> Self {
         Self {
-            instr_mem: std::array::from_fn(|_| None),
+            instr_mem: [0; 32],
             sms: std::array::from_fn(|_| StateMachine { state: State::new(), config: Config::new(), enabled: false }),
-            gpio_out: 0,
-            gpio_dir: 0,
+            pads: [0; 2],
             gpio_in: 0,
             irq_flags: 0,
             cycle: 0,
             strict,
         }
     }
-    pub fn configure(&mut self, sm: usize, execctrl: u32, shiftctrl: u32, pinctrl: u32) {
+    pub fn configure(&mut self, sm: usize, clkdiv: u32, execctrl: u32, shiftctrl: u32, pinctrl: u32) {
         let field = |register: u32, lsb: u32, bits: u32| (register >> lsb) & ((1 << bits) - 1);
         assert_strict(
             self.strict,
@@ -64,23 +62,43 @@ impl Block {
         assert_strict(self.strict, field(pinctrl, 20, 6) <= 32, "out_count_above_32");
         assert_strict(self.strict, field(pinctrl, 26, 3) <= 5, "set_count_above_5");
         assert_strict(self.strict, field(pinctrl, 29, 3) <= 5, "sideset_count_above_5");
-        self.sms[sm].config = Config::from_registers(execctrl, shiftctrl, pinctrl);
+        self.sms[sm].config = Config::from_registers(clkdiv, execctrl, shiftctrl, pinctrl);
     }
     pub fn step(&mut self) {
-        let Block { sms, instr_mem, gpio_out, gpio_dir, gpio_in, irq_flags, cycle, strict } = self;
+        let Block { sms, instr_mem, pads, gpio_in, irq_flags, cycle, strict } = self;
+        let (mut irq_set, mut irq_clear) = (0, 0);
         for (i, sm) in sms.iter_mut().enumerate() {
-            if !sm.enabled {
-                continue;
-            }
-            let pc = sm.state.pc.value() as usize;
-            let instr = match sm.state.exec {
-                Some(word) => Instr::decode(word, &sm.config, *strict),
-                None => instr_mem[pc].expect("no instruction at PC"),
+            let waiting = sm.state.irq_wait.is_some();
+            sm.state.irq_wait = sm.state.irq_wait.filter(|&index| bit_at(*irq_flags, index));
+            let ticks = |cycle: u64| match cycle {
+                0 => 0,
+                _ => (cycle * 256 + sm.config.clkdiv % 256).div_ceil(sm.config.clkdiv),
             };
-
-            sm.execute(&instr, gpio_out, gpio_dir, *gpio_in, irq_flags, i as u8, *strict);
+            let word = sm.state.exec.unwrap_or(instr_mem[sm.state.pc.value() as usize]);
+            let issued = match sm.enabled && !waiting && ticks(*cycle + 1) > ticks(*cycle) {
+                true => sm.execute(word, pads, *gpio_in, *irq_flags, i as u8, *strict),
+                false => None,
+            };
+            match (issued, sm.state.last_pin_write.filter(|_| sm.enabled && sm.config.out_sticky)) {
+                (Some((set, clear)), _) => (irq_set, irq_clear) = (irq_set | set, irq_clear | clear),
+                (None, Some(write)) => write_pins(pads, write),
+                (None, None) => (),
+            }
         }
+        *irq_flags = *irq_flags & !irq_clear & 0xff | irq_set;
         *cycle += 1;
+    }
+    pub fn pads(&self) -> [u32; 2] {
+        let mut pads = self.pads;
+        for write in self
+            .sms
+            .iter()
+            .filter(|sm| sm.enabled && sm.config.out_sticky)
+            .filter_map(|sm| sm.state.last_pin_write)
+        {
+            write_pins(&mut pads, write);
+        }
+        pads
     }
 }
 
@@ -96,7 +114,8 @@ pub fn to_mask(val: u8) -> u32 {
     if val == 32 { u32::MAX } else { (1u32 << val) - 1 }
 }
 
-fn write_pins(pins: &mut u32, data: u32, base: u8, count: u8) {
+fn write_pins(pads: &mut [u32; 2], (dirs, data, base, count): (bool, u32, u8, u8)) {
+    let pins = &mut pads[dirs as usize];
     let mask = to_mask(count).rotate_left(base as u32);
     *pins = (*pins & !mask) | (data.rotate_left(base as u32) & mask);
 }
@@ -116,15 +135,14 @@ pub fn reverse(x: u32) -> u32 {
     ans
 }
 
-pub fn bit_at(x: u8, index: u8) -> bool {
+pub fn bit_at(x: u32, index: u8) -> bool {
     ((x >> index) & 0x1) == 1
 }
 
-pub fn calc_irq_index(index: u8, sm_id: u8) -> Option<u8> {
+pub fn calc_irq_index(index: u8, sm_id: u8) -> u8 {
     match index >> 3 & 3 {
-        0 => Some(index & 7),
-        2 => Some((index & 4) | ((index + sm_id) & 3)),
-        _ => None,
+        2 => (index & 4) | ((index + sm_id) & 3),
+        mode => [0, 8, 0, 16][mode as usize] | index & 7,
     }
 }
 
@@ -148,27 +166,17 @@ impl StateMachine {
     }
 
     // TODO function for gpio in / out mapping
-    fn execute(
-        &mut self,
-        instr: &Instr,
-        gpio_out: &mut u32,
-        gpio_dir: &mut u32,
-        gpio_in: u32,
-        irq_flags: &mut u8,
-        sm_id: u8,
-        strict: bool,
-    ) {
+    fn execute(&mut self, word: u16, pads: &mut [u32; 2], gpio_in: u32, irq_flags: u32, sm_id: u8, strict: bool) -> Option<(u32, u32)> {
+        let instr = Instr::decode(word, &self.config, strict);
+        let (mut irq_set, mut irq_clear) = (0, 0);
         let threshold = self.config.calc_pull_thresh();
         let was_empty = self.state.osr_shift_count >= threshold;
-        match (self.state.irq_wait, self.state.delay_counter > 0 && !self.state.stalled) {
-            (Some(irq_index), _) => {
-                if !bit_at(*irq_flags, irq_index) {
-                    self.state.irq_wait = None;
-                    self.state.stalled = false;
-                }
+        let issued = match self.state.delay_counter > 0 && !self.state.stalled {
+            true => {
+                self.state.delay_counter -= 1;
+                false
             }
-            (None, true) => self.state.delay_counter -= 1,
-            (None, false) => {
+            false => {
                 let mut advance_pc = true;
                 let mut wrote_pins = false;
                 let exec = self.state.exec.take();
@@ -176,7 +184,7 @@ impl StateMachine {
                 let status = match self.config.status {
                     Status::TxLevel(n) => self.state.tx_fifo.len() < n as usize,
                     Status::RxLevel(n) => self.state.rx_fifo.len() < n as usize,
-                    Status::Irq(n) => n < 8 && bit_at(*irq_flags, n),
+                    Status::Irq(n) => bit_at(irq_flags, n),
                     Status::Reserved => false,
                 };
                 let status = if status { u32::MAX } else { 0 };
@@ -208,7 +216,7 @@ impl StateMachine {
                     Instruction::Wait { polarity, source, index } => {
                         let (polarity, index) = (polarity.value() as u32, index.value() as u32);
                         let irq_index = calc_irq_index(index as u8, sm_id);
-                        assert_strict(strict, !matches!(source, wait::Source::Irq) || irq_index.is_some(), "irq_prev_next");
+                        assert_strict(strict, !matches!(source, wait::Source::Irq) || irq_index < 8, "irq_prev_next");
                         assert_strict(
                             strict,
                             !matches!(source, wait::Source::JmpPin) || index < 4,
@@ -218,12 +226,12 @@ impl StateMachine {
                         let cond_met = match source {
                             wait::Source::Gpio => (gpio_in >> index) & 1,
                             wait::Source::Pin => (pins >> index) & 1,
-                            wait::Source::Irq => irq_index.map_or(0, |i| (*irq_flags as u32 >> i) & 1),
+                            wait::Source::Irq => irq_flags >> irq_index & 1,
                             wait::Source::JmpPin => (gpio_in >> ((self.config.jmp_pin.value() as u32 + (index & 3)) % 32)) & 1,
                         } == polarity;
                         if cond_met {
-                            if let (wait::Source::Irq, 1, Some(i)) = (source, polarity, irq_index) {
-                                *irq_flags &= !(1 << i);
+                            if let (wait::Source::Irq, 1) = (source, polarity) {
+                                irq_clear |= 1 << irq_index;
                             }
                         } else {
                             self.state.stalled = true;
@@ -299,8 +307,8 @@ impl StateMachine {
                             match destn {
                                 shift::Destn::Pins | shift::Destn::PinDirs => {
                                     let dirs = matches!(destn, shift::Destn::PinDirs);
-                                    let write = (dirs, data, self.config.out_base.get(), self.config.out_count.get());
-                                    self.state.last_pin_write = enabled.then_some(write);
+                                    let write = (dirs, data, self.config.out_base.get(), self.config.out_count.get() * enabled as u8);
+                                    self.state.last_pin_write = Some(write);
                                     wrote_pins = true;
                                 }
                                 shift::Destn::X => self.state.x = data,
@@ -387,7 +395,7 @@ impl StateMachine {
                             (true, _, _) => self.state.rx_putget[index.map_or(self.state.y as usize & 3, |i| i.value() as usize)],
                             (false, true, _) => {
                                 assert_strict(strict, false, "mov_osr_rxfifo_put_only");
-                                self.state.rx_putget[1]
+                                self.state.rx_putget[2]
                             }
                             (false, false, 0) => {
                                 assert_strict(strict, false, "mov_osr_rxfifo_tx_joined");
@@ -453,8 +461,8 @@ impl StateMachine {
                             mov::Destn::Pins | mov::Destn::PinDirs => {
                                 let enabled = self.config.out_enable_bit.is_none_or(|bit| data >> bit & 1 == 1);
                                 let dirs = matches!(destn, mov::Destn::PinDirs);
-                                let write = (dirs, data, self.config.out_base.get(), self.config.out_count.get());
-                                self.state.last_pin_write = enabled.then_some(write);
+                                let write = (dirs, data, self.config.out_base.get(), self.config.out_count.get() * enabled as u8);
+                                self.state.last_pin_write = Some(write);
                                 wrote_pins = true;
                             }
                             mov::Destn::X => self.state.x = data,
@@ -474,16 +482,19 @@ impl StateMachine {
                             }
                         }
                     }
-                    Instruction::Irq { clear, wait, index } => match (calc_irq_index(index.value(), sm_id), clear.value(), wait.value()) {
-                        (None, _, _) => assert_strict(strict, false, "irq_prev_next"),
-                        (Some(i), 1, _) => *irq_flags &= !(1 << i),
-                        (Some(i), _, wait) => {
-                            *irq_flags |= 1 << i;
-                            if wait == 1 {
-                                self.state.irq_wait = Some(i);
+                    Instruction::Irq { clear, wait, index } => {
+                        let i = calc_irq_index(index.value(), sm_id);
+                        assert_strict(strict, i < 8, "irq_prev_next");
+                        match (clear.value(), wait.value()) {
+                            (1, _) => irq_clear |= 1 << i,
+                            (_, wait) => {
+                                irq_set |= 1 << i;
+                                if wait == 1 {
+                                    self.state.irq_wait = Some(i);
+                                }
                             }
                         }
-                    },
+                    }
                     Instruction::Set { destn, data } => match destn {
                         set::Destn::Pins | set::Destn::PinDirs => {
                             let dirs = matches!(destn, set::Destn::PinDirs);
@@ -514,13 +525,8 @@ impl StateMachine {
                     )
                 });
                 let pin_write = self.state.last_pin_write.filter(|_| wrote_pins || self.config.out_sticky);
-                let writes = if self.config.out_sticky {
-                    [side_write, pin_write]
-                } else {
-                    [pin_write, side_write]
-                };
-                for (dirs, data, base, count) in writes.into_iter().flatten() {
-                    write_pins(if dirs { &mut *gpio_dir } else { &mut *gpio_out }, data, base, count);
+                for write in [pin_write, side_write].into_iter().flatten() {
+                    write_pins(pads, write);
                 }
                 if self.state.stalled {
                     self.state.exec = exec;
@@ -534,20 +540,21 @@ impl StateMachine {
                         }
                     }
                 }
+                true
             }
-        }
+        };
         let count = self.state.osr_shift_count;
         if self.config.autopull && (was_empty && count >= threshold || count == threshold) && !self.state.tx_fifo.is_empty() {
             self.state.osr = self.state.tx_fifo.pop_front().expect("tx fifo empty when it shouldn't be");
             self.state.osr_shift_count = 0;
         }
+        issued.then_some((irq_set, irq_clear))
     }
 }
 
 #[derive(Debug)]
 pub struct State {
     pub pc: u5,
-    // no clock divider, don't think about timing rn
     pub x: u32,
     pub y: u32,
     pub isr: u32,
@@ -639,16 +646,14 @@ pub struct Config {
     rx_get: bool,
     tx_depth: usize,
     rx_depth: usize,
-    // TODO clkdiv?
-    // clkdiv_int: u16,
-    // clkdiv_frac: u8,
+    clkdiv: u64,
 }
 
 impl Config {
     fn new() -> Self {
-        Self::from_registers(0x0001_f000, 0x000c_0000, 0x1400_0000)
+        Self::from_registers(0x0001_0000, 0x0001_f000, 0x000c_0000, 0x1400_0000)
     }
-    pub fn from_registers(execctrl: u32, shiftctrl: u32, pinctrl: u32) -> Self {
+    pub fn from_registers(clkdiv: u32, execctrl: u32, shiftctrl: u32, pinctrl: u32) -> Self {
         let field = |register: u32, lsb: u32, bits: u32| ((register >> lsb) & ((1 << bits) - 1)) as u8;
         let join = if field(shiftctrl, 14, 2) == 0 {
             field(shiftctrl, 30, 2) as usize
@@ -694,6 +699,11 @@ impl Config {
             rx_get: field(shiftctrl, 14, 1) == 1,
             tx_depth: [4, 8, 0, 0][join],
             rx_depth: [4, 0, 8, 0][join],
+            clkdiv: if clkdiv >> 16 == 0 {
+                1 << 24 | clkdiv as u64 >> 8
+            } else {
+                clkdiv as u64 >> 8
+            },
         }
     }
     fn calc_pull_thresh(&self) -> u8 {

@@ -30,8 +30,8 @@ fn test_invert() {
 
 #[test]
 fn test_irq_index() {
-    assert_eq!(calc_irq_index(0x11, 2), Some(3));
-    assert_eq!(calc_irq_index(0x13, 2), Some(1));
+    assert_eq!(calc_irq_index(0x11, 2), 3);
+    assert_eq!(calc_irq_index(0x13, 2), 1);
 }
 
 #[test]
