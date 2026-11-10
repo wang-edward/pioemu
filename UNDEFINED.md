@@ -29,7 +29,7 @@ counts separately. "Hardware" is what difftest observed on a Pico 2.
 | Instructions written to SMx_INSTR "must not stall" when EXEC is used | 11.5.7, p.825 | SMx_INSTR writes are not modelled | not tested |
 | `WAIT 1 IRQ` "should not be used" with IRQ flags routed to the interrupt controller | 11.4.3.2, p.805 | not modelled | not tested |
 | Reading an empty RX FIFO from the system: "data returned ... is undefined" | 11.7 RXF0–3, p.853 | not modelled | not tested |
-| IRQ instruction bit 7 (encoding shows 0) | 11.4.11.1, p.812 | ignored | not tested (difftest never sets it) |
+| IRQ instruction bit 7 (encoding shows 0) | 11.4.11.1, p.812 | ignored | ignored, with and without Clear and Wait |
 | SET_COUNT or SIDESET_COUNT above 5 ("in the range 0 to 5") | 11.7 SM0_PINCTRL, p.859 | panics | not compared |
 
 ## Defined by the datasheet, but the hardware differs or goes further

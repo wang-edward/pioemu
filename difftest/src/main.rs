@@ -243,7 +243,7 @@ fn random_word(rng: &mut Rng, origin: u8, len: usize) -> u16 {
             _ => (4, rng.below(8), rng.below(16)),
         },
         5 => (5, rng.below(8), rng.below(32)),
-        6 => (6, rng.below(4), rng.below(32)),
+        6 => (6, rng.below(8), rng.below(32)),
         _ => (7, rng.below(8), rng.below(32)),
     };
     let delay = if rng.below(2) == 0 { rng.below(32) } else { 0 };
