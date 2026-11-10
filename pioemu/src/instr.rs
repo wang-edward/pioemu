@@ -90,11 +90,11 @@ pub enum Instruction {
 pub struct Instr {
     pub instruction: Instruction,
     pub delay: u5,
-    pub side_set: Option<u5>,
+    pub side_set: Option<u8>,
 }
 
 impl Instr {
-    pub fn decode(word: u16, side_bits: u8, side_optional: bool) -> Self {
+    pub fn decode(word: u16, side_bits: u8, side_optional: bool, strict: bool) -> Self {
         let (a, b) = (((word >> 5) & 7) as usize, (word & 31) as u8);
         let bit = |i: usize| u1::new(((a >> i) & 1) as u8);
         let instruction = match word >> 13 {
@@ -117,11 +117,24 @@ impl Instr {
             4 => {
                 let index = (b >> 3 & 1 == 1).then(|| u2::new(b & 3));
                 match (b >> 4, a & 4, b & 0x0f) {
-                    (0, 0, _) => Instruction::Push { if_full: bit(1), block: bit(0) },
-                    (0, _, _) => Instruction::Pull { if_empty: bit(1), block: bit(0) },
-                    (_, _, 1..8) => panic!("undefined: {word:04x} indexes the RX FIFO by Y with a nonzero index"),
-                    (_, 0, _) => Instruction::MovToRx { index },
-                    _ => Instruction::MovFromRx { if_empty: bit(1), block: bit(0), index },
+                    (0, 0, _) => {
+                        assert!(!strict || b == 0, "undefined: push_low_bits");
+                        Instruction::Push { if_full: bit(1), block: bit(0) }
+                    }
+                    (0, _, _) => {
+                        assert!(!strict || b == 0, "undefined: pull_low_bits");
+                        Instruction::Pull { if_empty: bit(1), block: bit(0) }
+                    }
+                    (_, 0, 1..8) if strict => panic!("undefined: put_y_index_nonzero"),
+                    (_, _, 1..8) if strict => panic!("undefined: get_y_index_nonzero"),
+                    (_, 0, _) => {
+                        assert!(!strict || a == 0, "undefined: put_bits_6_5");
+                        Instruction::MovToRx { index }
+                    }
+                    _ => {
+                        assert!(!strict || a == 4, "undefined: get_bits_6_5");
+                        Instruction::MovFromRx { if_empty: bit(1), block: bit(0), index }
+                    }
                 }
             }
             5 => {
@@ -150,24 +163,25 @@ impl Instr {
                     ][(b & 7) as usize],
                 }
             }
-            6 => Instruction::Irq { clear: bit(1), wait: bit(0), index: u5::new(b) },
+            6 => {
+                assert!(!strict || a < 4, "undefined: irq_bit_7");
+                Instruction::Irq { clear: bit(1), wait: bit(0), index: u5::new(b) }
+            }
             _ => {
                 use set::Destn::*;
                 Instruction::Set { destn: [Pins, X, Y, Reserved1, PinDirs, Reserved2, Reserved3, Reserved4][a], data: u5::new(b) }
             }
         };
 
-        assert!(side_bits <= 5, "undefined: SIDESET_COUNT {side_bits} above 5");
         let field = ((word >> 8) & 31) as u8;
-        let delay_bits = 5 - side_bits;
-        let side = field >> delay_bits;
+        let side = ((field as u16) << side_bits >> 5) as u8;
         let side_set = match (side_bits, side_optional) {
             (0, _) => None,
             (_, true) if side >> (side_bits - 1) == 0 => None,
             (_, true) => Some(side & !(1 << (side_bits - 1))),
             _ => Some(side),
         };
-        Self { instruction, delay: u5::new(field & ((1 << delay_bits) - 1)), side_set: side_set.map(u5::new) }
+        Self { instruction, delay: u5::new(field & (31 >> side_bits)), side_set }
     }
 }
 
@@ -294,7 +308,7 @@ impl fmt::Display for Instr {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{}", self.instruction)?;
         if let Some(ss) = self.side_set {
-            write!(f, " side {}", ss.value())?;
+            write!(f, " side {ss}")?;
         }
         if self.delay.value() > 0 {
             write!(f, " [{}]", self.delay.value())?;
