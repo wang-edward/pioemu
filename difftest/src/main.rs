@@ -1,6 +1,6 @@
 use std::error::Error;
 use std::io::{BufRead, BufReader, Write};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use arbitrary_int::u5;
 use pioemu::instr::Instr;
@@ -21,20 +21,33 @@ fn main() -> Result<(), Box<dyn Error>> {
             std::thread::sleep(Duration::from_secs(3));
             Ok(())
         }
-        [count] => run_random(count.parse()?, SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos() as u64),
-        [count, seed] => run_random(count.parse()?, seed.parse()?),
-        _ => Err("usage: difftest <count> [seed] | difftest bootsel".into()),
+        ["sweep", state] => run(sweep(state.parse()?)),
+        [count] | [count, _] => {
+            let seed = match args.get(1) {
+                Some(seed) => seed.parse()?,
+                None => SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos() as u64,
+            };
+            run((seed..seed + count.parse::<u64>()?)
+                .map(|seed| (format!("seed {seed}"), random_request(&mut Rng(seed))))
+                .collect())
+        }
+        _ => Err(format!(
+            "usage: difftest <count> [seed] | difftest sweep <0..{}> | difftest bootsel",
+            SWEEP_STATES.len() - 1
+        )
+        .into()),
     }
 }
 
-fn run_random(count: u64, seed: u64) -> Result<(), Box<dyn Error>> {
+fn run(requests: Vec<(String, Request)>) -> Result<(), Box<dyn Error>> {
     let mut hardware = Hardware::open()?;
-    let (mut failed, mut undefined) = (0, 0);
-    for program_seed in seed..seed + count {
-        let request = random_request(&mut Rng(program_seed));
-        let rows = hardware.run(&request)?;
-        let failure = match std::panic::catch_unwind(|| emulate(&request)) {
-            Ok(emulator) => first_difference(&rows, &emulator),
+    let mut failed = Vec::new();
+    let mut undefined = 0;
+    let start = Instant::now();
+    std::panic::set_hook(Box::new(|_| {}));
+    for (index, (label, request)) in requests.iter().enumerate() {
+        let failure = match std::panic::catch_unwind(|| emulate(request)) {
+            Ok(emulator) => first_difference(&hardware.run(request)?, &emulator),
             Err(payload) => match payload
                 .downcast_ref::<String>()
                 .map(String::as_str)
@@ -44,19 +57,31 @@ fn run_random(count: u64, seed: u64) -> Result<(), Box<dyn Error>> {
                     undefined += 1;
                     None
                 }
-                _ => Some("Emulator panicked\n".to_owned()),
+                message => Some(format!("Emulator panicked: {}\n", message.unwrap_or("?"))),
             },
         };
         if let Some(failure) = failure {
-            failed += 1;
-            println!("seed {program_seed}:\n{}{failure}", disassemble(&request));
+            failed.push(label.as_str());
+            println!("{label}:\n{}{failure}", disassemble(request));
         }
+        eprint!(
+            "\r{} of {} programs, {:.0}/s ",
+            index + 1,
+            requests.len(),
+            (index + 1) as f64 / start.elapsed().as_secs_f64()
+        );
     }
     println!(
-        "{} of {count} programs matched, {undefined} hit undefined behaviour",
-        count - failed - undefined
+        "\n{} of {} programs matched, {undefined} hit undefined behaviour",
+        requests.len() - failed.len() - undefined,
+        requests.len()
     );
-    if failed == 0 { Ok(()) } else { Err("Emulator mismatch".into()) }
+    if failed.is_empty() {
+        Ok(())
+    } else {
+        println!("failed: {}", failed.join(", "));
+        Err("Emulator mismatch".into())
+    }
 }
 
 struct Hardware {
@@ -305,6 +330,123 @@ fn random_request(rng: &mut Rng) -> Request {
     request
 }
 
+const SWEEP_STATES: [Request; 5] = [
+    Request {
+        ticks: 0,
+        execctrl: 0,
+        shiftctrl: 0,
+        pinctrl: 0,
+        origin: 0,
+        len: 1,
+        code: [0; MAX_WORDS],
+        tx_len: 0,
+        tx: [0; MAX_TX],
+        x: 0,
+        y: 0,
+        isr: 0,
+        isr_count: 0,
+        osr: 0,
+        osr_count: 0,
+        irq: 0,
+        gpio_in: 0,
+        rx: [0; 4],
+    },
+    Request {
+        ticks: 0,
+        execctrl: 5 << 24 | 9 << 12 | 9 << 7 | 2,
+        shiftctrl: 20 << 25 | 12 << 20 | 1 << 19 | 1 << 18,
+        pinctrl: 2 << 29 | 5 << 26 | 8 << 20 | 3 << 15 | 12 << 10 | 8 << 5 | 4,
+        origin: 9,
+        len: 1,
+        code: [0; MAX_WORDS],
+        tx_len: 4,
+        tx: [0x0123_4567, 0x89ab_cdef, 0xfedc_ba98, 0x7654_3210],
+        x: 0xffff_ffff,
+        y: 0x5555_5555,
+        isr: 0xa5a5_a5a5,
+        isr_count: 16,
+        osr: 0x0000_c3c3,
+        osr_count: 16,
+        irq: 0xff,
+        gpio_in: 0xaaaa_aaaa,
+        rx: [0; 4],
+    },
+    Request {
+        ticks: 0,
+        execctrl: 1 << 30 | 1 << 29 | 7 << 24 | 6 << 19 | 1 << 18 | 1 << 17 | 20 << 12 | 20 << 7 | 1 << 5 | 1,
+        shiftctrl: 24 << 25 | 8 << 20 | 1 << 17 | 1 << 16,
+        pinctrl: 3 << 29 | 3 << 26 | 4 << 20 | 16 << 15 | 31 << 10 | 30,
+        origin: 20,
+        len: 1,
+        code: [0; MAX_WORDS],
+        tx_len: 1,
+        tx: [0xdead_beef, 0, 0, 0],
+        x: 0x8000_0001,
+        y: 1,
+        isr: 0x1234_5678,
+        isr_count: 7,
+        osr: 0xdea0_0000,
+        osr_count: 20,
+        irq: 0x5a,
+        gpio_in: 0x0f0f_0f0f,
+        rx: [0; 4],
+    },
+    Request {
+        ticks: 0,
+        execctrl: 29 << 12 | 29 << 7 | 2 << 5 | 3,
+        shiftctrl: 1 << 18 | 1 << 15 | 1 << 14,
+        pinctrl: 5 << 29 | 5 << 26 | 32 << 20 | 2 << 10 | 26 << 5,
+        origin: 29,
+        len: 1,
+        code: [0; MAX_WORDS],
+        tx_len: 2,
+        tx: [0xffff_0000, 0x0000_ffff, 0, 0],
+        x: 1,
+        y: 0xffff_fffe,
+        isr: 0xcafe_f00d,
+        isr_count: 32,
+        osr: 0x1357_9bdf,
+        osr_count: 0,
+        irq: 0x0f,
+        gpio_in: 0xffff_ffff,
+        rx: [0x1111_1111, 0x2222_2222, 0x4444_4444, 0x8888_8888],
+    },
+    Request {
+        ticks: 0,
+        execctrl: 1 << 30 | 31 << 24 | 15 << 12 | 15 << 7 | 4,
+        shiftctrl: 1 << 30 | 1 << 19 | 1 << 18 | 1 << 17 | 1 << 16,
+        pinctrl: 1 << 29 | 1 << 26 | 1 << 20 | 1 << 15 | 1 << 10 | 1 << 5 | 1,
+        origin: 15,
+        len: 1,
+        code: [0; MAX_WORDS],
+        tx_len: 3,
+        tx: [0x8000_0000, 0xffff_ffff, 1, 0],
+        x: 0x7fff_ffff,
+        y: 0x8000_0000,
+        isr: 0x7fff_fffe,
+        isr_count: 31,
+        osr: 0,
+        osr_count: 32,
+        irq: 0x80,
+        gpio_in: 0x5555_5555,
+        rx: [0; 4],
+    },
+];
+
+fn sweep(state: usize) -> Vec<(String, Request)> {
+    (0..=u16::MAX)
+        .filter(|word| word >> 13 != 0 || word & 31 < 30)
+        .map(|word| {
+            let mut code = [0; MAX_WORDS];
+            code[0] = word;
+            (
+                format!("word {word:04x}"),
+                Request { ticks: (word >> 8 & 31) as u32 + 2, code, ..SWEEP_STATES[state] },
+            )
+        })
+        .collect()
+}
+
 fn disassemble(request: &Request) -> String {
     let mut text = format!(
         "  execctrl {:08x}, shiftctrl {:08x}, pinctrl {:08x}, tx {:08x?}\n  x {:08x}, y {:08x}, isr {:08x} ({}), osr {:08x} ({}), irq {:02x}, gpio_in {:08x}, rx {:08x?}\n",
@@ -375,6 +517,26 @@ mod tests {
             request.validate().unwrap();
             if request.side_bits() <= 5 {
                 disassemble(&request);
+            }
+        }
+    }
+    #[test]
+    fn sweep_requests_are_valid() {
+        for state in 0..SWEEP_STATES.len() {
+            for (label, request) in sweep(state) {
+                let mut wire = String::new();
+                request.write(&mut wire).unwrap();
+                assert_eq!(Request::parse(wire.trim_end()).as_ref(), Ok(&request));
+                if let Err(payload) = std::panic::catch_unwind(|| emulate(&request)) {
+                    let message = payload
+                        .downcast_ref::<String>()
+                        .map(String::as_str)
+                        .or(payload.downcast_ref::<&str>().copied());
+                    assert!(
+                        message.is_some_and(|message| message.starts_with("undefined")),
+                        "state {state} {label}: {message:?}"
+                    );
+                }
             }
         }
     }
