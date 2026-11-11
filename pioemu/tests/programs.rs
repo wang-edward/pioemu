@@ -109,16 +109,21 @@ fn jmp_x_eq_y() {
 
 #[test]
 fn fractional_clock_divider() {
-    let mut block = setup(&[0x0040], [true, false, false, false]);
-    block.configure(0, 0x0002_8000, 0, 0x000c_0000, 0x1400_0000);
-    let ticks: Vec<u32> = (1..=13)
-        .filter(|_| {
-            let x = block.sms[0].state.x;
-            block.step();
-            block.sms[0].state.x != x
-        })
-        .collect();
-    assert_eq!(ticks, [1, 3, 5, 8, 10, 13]);
+    for (clkdiv, expected) in [
+        (0x0002_8000, &[1, 3, 5, 8, 10, 13][..]),
+        (0x0001_4000, &[1, 2, 3, 4, 5, 7, 8, 9, 10, 12, 13]),
+    ] {
+        let mut block = setup(&[0x0040], [true, false, false, false]);
+        block.configure(0, clkdiv, 0, 0x000c_0000, 0x1400_0000);
+        let ticks: Vec<u32> = (1..=13)
+            .filter(|_| {
+                let x = block.sms[0].state.x;
+                block.step();
+                block.sms[0].state.x != x
+            })
+            .collect();
+        assert_eq!(ticks, expected);
+    }
 }
 
 #[test]
