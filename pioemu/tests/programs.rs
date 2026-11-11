@@ -120,3 +120,12 @@ fn fractional_clock_divider() {
         .collect();
     assert_eq!(ticks, [1, 3, 5, 8, 10, 13]);
 }
+
+#[test]
+fn delay_does_not_decode_next_instruction() {
+    let mut block = setup(&[0xe721, 0x800f], [true, false, false, false]);
+    for _ in 0..8 {
+        block.step();
+    }
+    assert_eq!(sm0(&block).pc.value(), 1);
+}

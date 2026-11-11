@@ -69,21 +69,21 @@ impl Block {
         let (mut irq_set, mut irq_clear) = (0, 0);
         for (i, sm) in sms.iter_mut().enumerate() {
             let waiting = sm.state.irq_wait.is_some();
-            sm.state.irq_wait = sm.state.irq_wait.filter(|&index| bit_at(*irq_flags, index));
+            sm.state.irq_wait = sm.state.irq_wait.filter(|&index| !sm.enabled || bit_at(*irq_flags, index));
             let ticks = |cycle: u64| match cycle {
                 0 => 0,
                 _ => (cycle * 256 + sm.config.clkdiv % 256).div_ceil(sm.config.clkdiv),
             };
             let word = sm.state.exec.unwrap_or(instr_mem[sm.state.pc.value() as usize]);
-            let issued = match sm.enabled && !waiting && ticks(*cycle + 1) > ticks(*cycle) {
-                true => sm.execute(word, pads, *gpio_in, *irq_flags, i as u8, *strict),
-                false => None,
+            let (set, clear, wrote_pins, side_write) = match sm.enabled && !waiting && ticks(*cycle + 1) > ticks(*cycle) {
+                true => sm.execute(word, *gpio_in, *irq_flags, i as u8, *strict),
+                false => (0, 0, false, None),
             };
-            match (issued, sm.state.last_pin_write.filter(|_| sm.enabled && sm.config.out_sticky)) {
-                (Some((set, clear)), _) => (irq_set, irq_clear) = (irq_set | set, irq_clear | clear),
-                (None, Some(write)) => write_pins(pads, write),
-                (None, None) => (),
+            let pin_write = sm.state.last_pin_write.filter(|_| wrote_pins || sm.enabled && sm.config.out_sticky);
+            for write in [pin_write, side_write].into_iter().flatten() {
+                write_pins(pads, write);
             }
+            (irq_set, irq_clear) = (irq_set | set, irq_clear | clear);
         }
         *irq_flags = *irq_flags & !irq_clear & 0xff | irq_set;
         *cycle += 1;
@@ -166,19 +166,25 @@ impl StateMachine {
     }
 
     // TODO function for gpio in / out mapping
-    fn execute(&mut self, word: u16, pads: &mut [u32; 2], gpio_in: u32, irq_flags: u32, sm_id: u8, strict: bool) -> Option<(u32, u32)> {
-        let instr = Instr::decode(word, &self.config, strict);
-        let (mut irq_set, mut irq_clear) = (0, 0);
+    fn execute(
+        &mut self,
+        word: u16,
+        gpio_in: u32,
+        irq_flags: u32,
+        sm_id: u8,
+        strict: bool,
+    ) -> (u32, u32, bool, Option<(bool, u32, u8, u8)>) {
+        let (mut irq_set, mut irq_clear, mut wrote_pins) = (0, 0, false);
         let threshold = self.config.calc_pull_thresh();
         let was_empty = self.state.osr_shift_count >= threshold;
-        let issued = match self.state.delay_counter > 0 && !self.state.stalled {
+        let side_write = match self.state.delay_counter > 0 && !self.state.stalled {
             true => {
                 self.state.delay_counter -= 1;
-                false
+                None
             }
             false => {
+                let instr = Instr::decode(word, &self.config, strict);
                 let mut advance_pc = true;
-                let mut wrote_pins = false;
                 let exec = self.state.exec.take();
                 self.state.stalled = false;
                 let status = match self.config.status {
@@ -524,10 +530,6 @@ impl StateMachine {
                         side_count,
                     )
                 });
-                let pin_write = self.state.last_pin_write.filter(|_| wrote_pins || self.config.out_sticky);
-                for write in [pin_write, side_write].into_iter().flatten() {
-                    write_pins(pads, write);
-                }
                 if self.state.stalled {
                     self.state.exec = exec;
                 } else {
@@ -540,7 +542,7 @@ impl StateMachine {
                         }
                     }
                 }
-                true
+                side_write
             }
         };
         let count = self.state.osr_shift_count;
@@ -548,7 +550,7 @@ impl StateMachine {
             self.state.osr = self.state.tx_fifo.pop_front().expect("tx fifo empty when it shouldn't be");
             self.state.osr_shift_count = 0;
         }
-        issued.then_some((irq_set, irq_clear))
+        (irq_set, irq_clear, wrote_pins, side_write)
     }
 }
 

@@ -191,7 +191,7 @@ fn reset_and_initialize(resets: &pac::RESETS, registers: &pac::pio0::RegisterBlo
         registers.instr_mem(slot).write(|w| unsafe { w.bits(*instruction as u32) });
     }
 
-    registers.ctrl().write(|w| unsafe { w.bits(0xf << 4) });
+    registers.ctrl().write(|w| unsafe { w.bits((request.mask() as u32) << 4) });
     for (index, sm) in request.sms.iter().enumerate() {
         if let Some(sm) = sm {
             load_state(registers, index, sm);

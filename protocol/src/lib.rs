@@ -77,6 +77,9 @@ impl Request {
         if self.ticks == 0 || self.ticks > MAX_TICKS {
             return Err("ticks must be 1..1000");
         }
+        if self.mask() == 0 {
+            return Err("at least one state machine");
+        }
         self.sms.iter().flatten().try_for_each(Sm::validate)
     }
 
@@ -267,5 +270,6 @@ mod tests {
             let invalid = line.replacen(from, to, 1);
             assert!(Request::parse(&invalid).is_err(), "{invalid}");
         }
+        assert!(Request { sms: [None; 4], ..Request::parse(LINE).unwrap() }.validate().is_err());
     }
 }
