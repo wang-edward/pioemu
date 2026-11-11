@@ -594,6 +594,16 @@ mod tests {
         }
     }
     #[test]
+    fn sections_are_in_datasheet() {
+        let datasheet = include_str!("../../datasheet/rp2350.txt");
+        for (name, section, ..) in cases::cases() {
+            assert!(
+                datasheet.lines().any(|line| line.starts_with(&format!("{section}. "))),
+                "{name}: {section}"
+            );
+        }
+    }
+    #[test]
     fn random_requests_are_valid() {
         for seed in 0..10_000 {
             let request = random_request(&mut Rng(seed));
