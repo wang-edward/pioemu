@@ -188,15 +188,15 @@ fn emulate(request: &Request, strict: bool) -> Vec<String> {
     let mut words = [0u16; 32];
     words[request.origin as usize..][..request.len].copy_from_slice(&request.code[..request.len]);
     words[MAX_WORDS..].fill(MARKER_NOP);
-    let mut block = Block::new();
-    block.strict = strict;
+    let mut block = Block::new(strict);
     let config = Config::from_registers(request.execctrl, request.shiftctrl, request.pinctrl);
     for (instr, word) in block.instr_mem.iter_mut().zip(words) {
         *instr = Some(Instr::decode(word, &config, strict));
     }
 
+    block.configure(0, request.execctrl, request.shiftctrl, request.pinctrl);
+    block.configure(1, MARKER_EXECCTRL, 0x000c_0000, 0);
     let [test, marker, ..] = &mut block.sms;
-    test.config = config;
     test.state.pc = u5::new(request.origin);
     for word in &request.tx[..request.tx_len] {
         test.write_tx(*word);
@@ -210,7 +210,6 @@ fn emulate(request: &Request, strict: bool) -> Vec<String> {
     test.state.rx_putget = request.rx;
     block.irq_flags = request.irq;
     block.gpio_in = request.gpio_in;
-    marker.config = Config::from_registers(MARKER_EXECCTRL, 0x000c_0000, 0);
     marker.state.pc = u5::new(MAX_WORDS as u8);
     test.enabled = true;
     marker.enabled = true;

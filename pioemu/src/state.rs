@@ -28,11 +28,11 @@ pub struct Block {
     pub gpio_in: u32,
     pub irq_flags: u8,
     cycle: u64,
-    pub strict: bool,
+    strict: bool,
 }
 
 impl Block {
-    pub fn new() -> Self {
+    pub fn new(strict: bool) -> Self {
         Self {
             instr_mem: std::array::from_fn(|_| None),
             sms: std::array::from_fn(|_| StateMachine { state: State::new(), config: Config::new(), enabled: false }),
@@ -41,14 +41,33 @@ impl Block {
             gpio_in: 0,
             irq_flags: 0,
             cycle: 0,
-            strict: true,
+            strict,
         }
+    }
+    pub fn configure(&mut self, sm: usize, execctrl: u32, shiftctrl: u32, pinctrl: u32) {
+        let field = |register: u32, lsb: u32, bits: u32| (register >> lsb) & ((1 << bits) - 1);
+        assert_strict(
+            self.strict,
+            field(shiftctrl, 16, 1) == 0 || field(shiftctrl, 15, 1) == 0,
+            "autopush_rx_put",
+        );
+        assert_strict(
+            self.strict,
+            field(shiftctrl, 16, 1) == 0 || field(shiftctrl, 14, 1) == 0,
+            "autopush_rx_get",
+        );
+        assert_strict(
+            self.strict,
+            field(shiftctrl, 14, 2) == 0 || field(shiftctrl, 30, 2) == 0,
+            "fjoin_with_rx_putget",
+        );
+        assert_strict(self.strict, field(pinctrl, 20, 6) <= 32, "out_count_above_32");
+        assert_strict(self.strict, field(pinctrl, 26, 3) <= 5, "set_count_above_5");
+        assert_strict(self.strict, field(pinctrl, 29, 3) <= 5, "sideset_count_above_5");
+        self.sms[sm].config = Config::from_registers(execctrl, shiftctrl, pinctrl);
     }
     pub fn step(&mut self) {
         let Block { sms, instr_mem, gpio_out, gpio_dir, gpio_in, irq_flags, cycle, strict } = self;
-        for sm in sms.iter() {
-            sm.config.check(*strict);
-        }
         for (i, sm) in sms.iter_mut().enumerate() {
             if !sm.enabled {
                 continue;
@@ -68,7 +87,7 @@ impl Block {
 #[derive(Debug)]
 pub struct StateMachine {
     pub state: State,
-    pub config: Config,
+    config: Config,
     pub enabled: bool,
 }
 
@@ -620,8 +639,6 @@ pub struct Config {
     rx_get: bool,
     tx_depth: usize,
     rx_depth: usize,
-    pinctrl: u32,
-    shiftctrl: u32,
     // TODO clkdiv?
     // clkdiv_int: u16,
     // clkdiv_frac: u8,
@@ -677,21 +694,7 @@ impl Config {
             rx_get: field(shiftctrl, 14, 1) == 1,
             tx_depth: [4, 8, 0, 0][join],
             rx_depth: [4, 0, 8, 0][join],
-            pinctrl,
-            shiftctrl,
         }
-    }
-    fn check(&self, strict: bool) {
-        assert_strict(strict, !self.autopush || !self.rx_put, "autopush_rx_put");
-        assert_strict(strict, !self.autopush || !self.rx_get, "autopush_rx_get");
-        assert_strict(
-            strict,
-            !(self.rx_put || self.rx_get) || self.shiftctrl >> 30 == 0,
-            "fjoin_with_rx_putget",
-        );
-        assert_strict(strict, self.pinctrl >> 20 & 63 <= 32, "out_count_above_32");
-        assert_strict(strict, self.set_count.get() <= 5, "set_count_above_5");
-        assert_strict(strict, self.pinctrl >> 29 <= 5, "sideset_count_above_5");
     }
     fn calc_pull_thresh(&self) -> u8 {
         if self.pull_thresh.get() == 0 { 32 } else { self.pull_thresh.get() }
