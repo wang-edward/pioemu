@@ -195,14 +195,29 @@ impl Instr {
 
 impl fmt::Display for Instruction {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let irq = |index: &u5, op: &str| {
+            let mode = (index.value() >> 3 & 3) as usize;
+            format!(
+                "{}{op}{}{}",
+                ["", "prev ", "", "next "][mode],
+                index.value() & 7,
+                ["", "", " rel", ""][mode]
+            )
+        };
         match self {
             Instruction::Jmp { condition, address } => {
                 let cond = ["", "!x, ", "x--, ", "!y, ", "y--, ", "x!=y, ", "pin, ", "!osre, "][*condition as usize];
                 write!(f, "jmp {}{}", cond, address.value())
             }
             Instruction::Wait { polarity, source, index } => {
-                let src = ["gpio", "pin", "irq", "jmppin"][*source as usize];
-                write!(f, "wait {} {} {}", polarity.value(), src, index.value())
+                let arg = match (source, index.value()) {
+                    (wait::Source::Gpio, i) => format!("gpio {i}"),
+                    (wait::Source::Pin, i) => format!("pin {i}"),
+                    (wait::Source::Irq, _) => format!("irq {}", irq(index, "")),
+                    (wait::Source::JmpPin, 0) => "jmppin".into(),
+                    (wait::Source::JmpPin, i) => format!("jmppin + {i}"),
+                };
+                write!(f, "wait {} {}", polarity.value(), arg)
             }
             Instruction::In { source, bit_count } => {
                 let src = ["pins", "x", "y", "null", "???", "???", "isr", "osr"][*source as usize];
@@ -237,13 +252,12 @@ impl fmt::Display for Instruction {
                 write!(f, "mov {}, {}{}", dst, op, src)
             }
             Instruction::Irq { clear, wait, index } => {
-                if clear.value() == 1 {
-                    write!(f, "irq clear {}", index.value())
-                } else if wait.value() == 1 {
-                    write!(f, "irq wait {}", index.value())
-                } else {
-                    write!(f, "irq {}", index.value())
-                }
+                let op = match (clear.value(), wait.value()) {
+                    (1, _) => "clear ",
+                    (_, 1) => "wait ",
+                    _ => "",
+                };
+                write!(f, "irq {}", irq(index, op))
             }
             Instruction::Set { destn, data } => {
                 let dst = ["pins", "x", "y", "???", "pindirs", "???", "???", "???"][*destn as usize];

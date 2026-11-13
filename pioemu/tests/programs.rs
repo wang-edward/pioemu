@@ -134,3 +134,21 @@ fn delay_does_not_decode_next_instruction() {
     }
     assert_eq!(sm0(&block).pc.value(), 1);
 }
+
+#[test]
+fn disassembly() {
+    let config = state::Config::from_registers(0, 0, 0, 0);
+    let text = |word| pioemu::instr::Instr::decode(word, &config, false).to_string();
+    assert_eq!(text(0xc000), "irq 0");
+    assert_eq!(text(0xc010), "irq 0 rel");
+    assert_eq!(text(0xc008), "irq prev 0");
+    assert_eq!(text(0xc018), "irq next 0");
+    assert_eq!(text(0xc05b), "irq next clear 3");
+    assert_eq!(text(0xc034), "irq wait 4 rel");
+    assert_eq!(text(0x20d0), "wait 1 irq 0 rel");
+    assert_eq!(text(0x20ca), "wait 1 irq prev 2");
+    assert_eq!(text(0x205f), "wait 0 irq next 7");
+    assert_eq!(text(0x2060), "wait 0 jmppin");
+    assert_eq!(text(0x2065), "wait 0 jmppin + 5");
+    assert_eq!(text(0x2083), "wait 1 gpio 3");
+}
