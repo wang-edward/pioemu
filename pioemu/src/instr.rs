@@ -1,5 +1,5 @@
 use crate::assert_strict;
-use crate::state::Config;
+use crate::state::{Config, Range};
 use arbitrary_int::{u1, u2, u5};
 use std::fmt;
 
@@ -41,7 +41,7 @@ pub mod set {
 pub enum Instruction {
     Jmp {
         condition: Condition,
-        address: u5, // TODO use bool and range for instructions instead of u5
+        address: u5,
     },
     Wait {
         polarity: u1,
@@ -50,11 +50,11 @@ pub enum Instruction {
     },
     In {
         source: shift::Source,
-        bit_count: u5, // 0x00 = 32, not 0
+        bit_count: Range<1, 32>,
     },
     Out {
         destn: shift::Destn,
-        bit_count: u5, // 0x00 = 32, not 0
+        bit_count: Range<1, 32>,
     },
     Push {
         if_full: u1,
@@ -101,6 +101,7 @@ pub struct Instr {
 impl Instr {
     pub fn decode(word: u16, config: &Config, strict: bool) -> Self {
         let (a, b) = (((word >> 5) & 7) as usize, (word & 31) as u8);
+        let bit_count = Range::new(if b == 0 { 32 } else { b });
         let bit = |i: usize| u1::new(((a >> i) & 1) as u8);
         let instruction = match word >> 13 {
             0 => {
@@ -113,11 +114,11 @@ impl Instr {
             }
             2 => {
                 use shift::Source::*;
-                Instruction::In { source: [Pins, X, Y, Null, Reserved1, Reserved2, Isr, Osr][a], bit_count: u5::new(b) }
+                Instruction::In { source: [Pins, X, Y, Null, Reserved1, Reserved2, Isr, Osr][a], bit_count }
             }
             3 => {
                 use shift::Destn::*;
-                Instruction::Out { destn: [Pins, X, Y, Null, PinDirs, Pc, Isr, Exec][a], bit_count: u5::new(b) }
+                Instruction::Out { destn: [Pins, X, Y, Null, PinDirs, Pc, Isr, Exec][a], bit_count }
             }
             4 => {
                 let index = (b >> 3 & 1 == 1).then(|| u2::new(b & 3));
@@ -195,51 +196,21 @@ impl Instr {
 impl fmt::Display for Instruction {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            Instruction::Jmp { condition, address } => match condition {
-                Condition::Always => write!(f, "jmp {}", address.value()),
-                Condition::XZero => write!(f, "jmp !x, {}", address.value()),
-                Condition::XDec => write!(f, "jmp x--, {}", address.value()),
-                Condition::YZero => write!(f, "jmp !y, {}", address.value()),
-                Condition::YDec => write!(f, "jmp y--, {}", address.value()),
-                Condition::XNeqY => write!(f, "jmp x!=y, {}", address.value()),
-                Condition::Pin => write!(f, "jmp pin, {}", address.value()),
-                Condition::OsrNotEmpty => write!(f, "jmp !osre, {}", address.value()),
-            },
+            Instruction::Jmp { condition, address } => {
+                let cond = ["", "!x, ", "x--, ", "!y, ", "y--, ", "x!=y, ", "pin, ", "!osre, "][*condition as usize];
+                write!(f, "jmp {}{}", cond, address.value())
+            }
             Instruction::Wait { polarity, source, index } => {
-                let src = match source {
-                    wait::Source::Gpio => "gpio",
-                    wait::Source::Pin => "pin",
-                    wait::Source::Irq => "irq",
-                    wait::Source::JmpPin => "jmppin",
-                };
+                let src = ["gpio", "pin", "irq", "jmppin"][*source as usize];
                 write!(f, "wait {} {} {}", polarity.value(), src, index.value())
             }
             Instruction::In { source, bit_count } => {
-                let src = match source {
-                    shift::Source::Pins => "pins",
-                    shift::Source::X => "x",
-                    shift::Source::Y => "y",
-                    shift::Source::Null => "null",
-                    shift::Source::Isr => "isr",
-                    shift::Source::Osr => "osr",
-                    _ => "???",
-                };
-                let n = if bit_count.value() == 0 { 32 } else { bit_count.value() as u32 };
-                write!(f, "in {}, {}", src, n)
+                let src = ["pins", "x", "y", "null", "???", "???", "isr", "osr"][*source as usize];
+                write!(f, "in {}, {}", src, bit_count.get())
             }
             Instruction::Out { destn, bit_count } => {
-                let dst = match destn {
-                    shift::Destn::Pins => "pins",
-                    shift::Destn::X => "x",
-                    shift::Destn::Y => "y",
-                    shift::Destn::Null => "null",
-                    shift::Destn::PinDirs => "pindirs",
-                    shift::Destn::Pc => "pc",
-                    shift::Destn::Isr => "isr",
-                    shift::Destn::Exec => "exec",
-                };
-                let n = if bit_count.value() == 0 { 32 } else { bit_count.value() as u32 };
-                write!(f, "out {}, {}", dst, n)
+                let dst = ["pins", "x", "y", "null", "pindirs", "pc", "isr", "exec"][*destn as usize];
+                write!(f, "out {}, {}", dst, bit_count.get())
             }
             Instruction::Push { if_full, block, .. } => {
                 let iffull = if if_full.value() == 1 { " iffull" } else { "" };
@@ -260,33 +231,10 @@ impl fmt::Display for Instruction {
                 None => write!(f, "mov osr, rxfifo[y]"),
             },
             Instruction::Mov { destn, op, source } => {
-                let dst = match destn {
-                    mov::Destn::Pins => "pins",
-                    mov::Destn::X => "x",
-                    mov::Destn::Y => "y",
-                    mov::Destn::PinDirs => "pindirs",
-                    mov::Destn::Exec => "exec",
-                    mov::Destn::Pc => "pc",
-                    mov::Destn::Isr => "isr",
-                    mov::Destn::Osr => "osr",
-                };
-                let src = match source {
-                    mov::Source::Pins => "pins",
-                    mov::Source::X => "x",
-                    mov::Source::Y => "y",
-                    mov::Source::Null => "null",
-                    mov::Source::Status => "status",
-                    mov::Source::Isr => "isr",
-                    mov::Source::Osr => "osr",
-                    _ => "???",
-                };
-                let op_str = match op {
-                    mov::Op::None => "",
-                    mov::Op::Invert => "!",
-                    mov::Op::BitReverse => "::",
-                    _ => "???",
-                };
-                write!(f, "mov {}, {}{}", dst, op_str, src)
+                let dst = ["pins", "x", "y", "pindirs", "exec", "pc", "isr", "osr"][*destn as usize];
+                let op = ["", "!", "::", "???"][*op as usize];
+                let src = ["pins", "x", "y", "null", "???", "status", "isr", "osr"][*source as usize];
+                write!(f, "mov {}, {}{}", dst, op, src)
             }
             Instruction::Irq { clear, wait, index } => {
                 if clear.value() == 1 {
@@ -298,13 +246,7 @@ impl fmt::Display for Instruction {
                 }
             }
             Instruction::Set { destn, data } => {
-                let dst = match destn {
-                    set::Destn::Pins => "pins",
-                    set::Destn::X => "x",
-                    set::Destn::Y => "y",
-                    set::Destn::PinDirs => "pindirs",
-                    _ => "???",
-                };
+                let dst = ["pins", "x", "y", "???", "pindirs", "???", "???", "???"][*destn as usize];
                 write!(f, "set {}, {}", dst, data.value())
             }
         }
