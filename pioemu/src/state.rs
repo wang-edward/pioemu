@@ -1,10 +1,11 @@
+use crate::assert_strict;
 use crate::instr::{Condition, Instr, Instruction, mov, set, shift, wait};
 use arbitrary_int::u5;
 use std::cmp;
 use std::collections::VecDeque;
 
 #[derive(Clone, Copy, Debug)]
-struct Range<const MIN: u8, const MAX: u8>(u8);
+pub(crate) struct Range<const MIN: u8, const MAX: u8>(u8);
 
 impl<const MIN: u8, const MAX: u8> Range<MIN, MAX> {
     fn new(val: u8) -> Self {
@@ -12,7 +13,7 @@ impl<const MIN: u8, const MAX: u8> Range<MIN, MAX> {
         Self(val)
     }
 
-    fn get(self) -> u8 {
+    pub(crate) fn get(self) -> u8 {
         self.0
     }
 }
@@ -27,6 +28,7 @@ pub struct Block {
     pub gpio_in: u32,
     pub irq_flags: u8,
     cycle: u64,
+    pub strict: bool,
 }
 
 impl Block {
@@ -39,21 +41,25 @@ impl Block {
             gpio_in: 0,
             irq_flags: 0,
             cycle: 0,
+            strict: true,
         }
     }
     pub fn step(&mut self) {
-        let Block { sms, instr_mem, gpio_out, gpio_dir, gpio_in, irq_flags, cycle } = self;
+        let Block { sms, instr_mem, gpio_out, gpio_dir, gpio_in, irq_flags, cycle, strict } = self;
+        for sm in sms.iter() {
+            sm.config.check(*strict);
+        }
         for (i, sm) in sms.iter_mut().enumerate() {
             if !sm.enabled {
                 continue;
             }
             let pc = sm.state.pc.value() as usize;
             let instr = match sm.state.exec {
-                Some(word) => Instr::decode(word, sm.config.sideset_count.get(), sm.config.sideset_en, sm.config.strict),
+                Some(word) => Instr::decode(word, &sm.config, *strict),
                 None => instr_mem[pc].expect("no instruction at PC"),
             };
 
-            sm.execute(&instr, gpio_out, gpio_dir, *gpio_in, irq_flags, i as u8);
+            sm.execute(&instr, gpio_out, gpio_dir, *gpio_in, irq_flags, i as u8, *strict);
         }
         *cycle += 1;
     }
@@ -123,7 +129,16 @@ impl StateMachine {
     }
 
     // TODO function for gpio in / out mapping
-    fn execute(&mut self, instr: &Instr, gpio_out: &mut u32, gpio_dir: &mut u32, gpio_in: u32, irq_flags: &mut u8, sm_id: u8) {
+    fn execute(
+        &mut self,
+        instr: &Instr,
+        gpio_out: &mut u32,
+        gpio_dir: &mut u32,
+        gpio_in: u32,
+        irq_flags: &mut u8,
+        sm_id: u8,
+        strict: bool,
+    ) {
         let threshold = self.config.calc_pull_thresh();
         let was_empty = self.state.osr_shift_count >= threshold;
         match (self.state.irq_wait, self.state.delay_counter > 0 && !self.state.stalled) {
@@ -174,13 +189,11 @@ impl StateMachine {
                     Instruction::Wait { polarity, source, index } => {
                         let (polarity, index) = (polarity.value() as u32, index.value() as u32);
                         let irq_index = calc_irq_index(index as u8, sm_id);
-                        assert!(
-                            !self.config.strict || !matches!(source, wait::Source::Irq) || irq_index.is_some(),
-                            "undefined: irq_prev_next"
-                        );
-                        assert!(
-                            !self.config.strict || !matches!(source, wait::Source::JmpPin) || index < 4,
-                            "undefined: wait_jmppin_index_above_3"
+                        assert_strict(strict, !matches!(source, wait::Source::Irq) || irq_index.is_some(), "irq_prev_next");
+                        assert_strict(
+                            strict,
+                            !matches!(source, wait::Source::JmpPin) || index < 4,
+                            "wait_jmppin_index_above_3",
                         );
                         let pins = wrap_shiftr(gpio_in, self.config.in_base.get()) & to_mask(self.config.in_count.get());
                         let cond_met = match source {
@@ -205,7 +218,7 @@ impl StateMachine {
                             shift::Source::Y => self.state.y,
                             shift::Source::Null => 0,
                             shift::Source::Reserved1 | shift::Source::Reserved2 => {
-                                assert!(!self.config.strict, "undefined: in_reserved_sources");
+                                assert_strict(strict, false, "in_reserved_sources");
                                 status
                             }
                             shift::Source::Isr => self.state.isr,
@@ -291,10 +304,10 @@ impl StateMachine {
                     Instruction::Push { if_full, block, index } | Instruction::MovToRx { if_full, block, index } => {
                         let put = matches!(instr.instruction, Instruction::MovToRx { .. });
                         match (put, self.config.rx_put, self.config.rx_get) {
-                            (false, true, _) => assert!(!self.config.strict, "undefined: push_rx_put"),
-                            (false, false, true) => assert!(!self.config.strict, "undefined: push_rx_get"),
-                            (true, false, true) => assert!(!self.config.strict, "undefined: mov_rxfifo_isr_get_only"),
-                            (true, false, false) => assert!(!self.config.strict, "undefined: mov_rxfifo_isr_no_join"),
+                            (false, true, _) => assert_strict(strict, false, "push_rx_put"),
+                            (false, false, true) => assert_strict(strict, false, "push_rx_get"),
+                            (true, false, true) => assert_strict(strict, false, "mov_rxfifo_isr_get_only"),
+                            (true, false, false) => assert_strict(strict, false, "mov_rxfifo_isr_no_join"),
                             _ => (),
                         }
                         let (if_full, block) = (if_full.value() == 1, block.value() == 1);
@@ -354,15 +367,15 @@ impl StateMachine {
                         let data = match (self.config.rx_get, self.config.rx_put, self.config.rx_depth) {
                             (true, _, _) => self.state.rx_putget[index.map_or(self.state.y as usize & 3, |i| i.value() as usize)],
                             (false, true, _) => {
-                                assert!(!self.config.strict, "undefined: mov_osr_rxfifo_put_only");
+                                assert_strict(strict, false, "mov_osr_rxfifo_put_only");
                                 self.state.rx_putget[1]
                             }
                             (false, false, 0) => {
-                                assert!(!self.config.strict, "undefined: mov_osr_rxfifo_tx_joined");
+                                assert_strict(strict, false, "mov_osr_rxfifo_tx_joined");
                                 self.state.tx_fifo.front().copied().unwrap_or(self.state.rx_putget[0])
                             }
                             (false, false, _) => {
-                                assert!(!self.config.strict, "undefined: mov_osr_rxfifo_no_join");
+                                assert_strict(strict, false, "mov_osr_rxfifo_no_join");
                                 self.state.rx_fifo.front().copied().unwrap_or(self.state.rx_putget[0])
                             }
                         };
@@ -384,29 +397,27 @@ impl StateMachine {
                             mov::Source::Y => self.state.y,
                             mov::Source::Null => 0,
                             mov::Source::Reserved => {
-                                assert!(!self.config.strict, "undefined: mov_reserved_source");
+                                assert_strict(strict, false, "mov_reserved_source");
                                 status
                             }
                             mov::Source::Status => {
                                 match self.config.status {
-                                    Status::TxLevel(n) => assert!(
-                                        !self.config.strict || n as usize <= self.config.tx_depth,
-                                        "undefined: status_level_above_depth"
-                                    ),
-                                    Status::RxLevel(n) => assert!(
-                                        !self.config.strict || n as usize <= self.config.rx_depth,
-                                        "undefined: status_level_above_depth"
-                                    ),
+                                    Status::TxLevel(n) => {
+                                        assert_strict(strict, n as usize <= self.config.tx_depth, "status_level_above_depth")
+                                    }
+                                    Status::RxLevel(n) => {
+                                        assert_strict(strict, n as usize <= self.config.rx_depth, "status_level_above_depth")
+                                    }
                                     Status::Irq(0..8) => (),
-                                    Status::Irq(8..24) => assert!(!self.config.strict, "undefined: irq_prev_next"),
-                                    Status::Irq(_) => assert!(!self.config.strict, "undefined: status_irq_index_above_23"),
-                                    Status::Reserved => assert!(!self.config.strict, "undefined: status_sel_3"),
+                                    Status::Irq(8..24) => assert_strict(strict, false, "irq_prev_next"),
+                                    Status::Irq(_) => assert_strict(strict, false, "status_irq_index_above_23"),
+                                    Status::Reserved => assert_strict(strict, false, "status_sel_3"),
                                 }
                                 status
                             }
                             mov::Source::Isr => self.state.isr,
                             mov::Source::Osr => {
-                                assert!(!self.config.strict || !self.config.autopull, "undefined: mov_osr_autopull");
+                                assert_strict(strict, !self.config.autopull, "mov_osr_autopull");
                                 self.state.osr
                             }
                         };
@@ -415,7 +426,7 @@ impl StateMachine {
                             mov::Op::Invert => !data,
                             mov::Op::BitReverse => reverse(data),
                             mov::Op::Reserved => {
-                                assert!(!self.config.strict, "undefined: mov_reserved_op");
+                                assert_strict(strict, false, "mov_reserved_op");
                                 !reverse(data)
                             }
                         };
@@ -445,7 +456,7 @@ impl StateMachine {
                         }
                     }
                     Instruction::Irq { clear, wait, index } => match (calc_irq_index(index.value(), sm_id), clear.value(), wait.value()) {
-                        (None, _, _) => assert!(!self.config.strict, "undefined: irq_prev_next"),
+                        (None, _, _) => assert_strict(strict, false, "irq_prev_next"),
                         (Some(i), 1, _) => *irq_flags &= !(1 << i),
                         (Some(i), _, wait) => {
                             *irq_flags |= 1 << i;
@@ -469,7 +480,7 @@ impl StateMachine {
                             self.state.y = data.value() as u32;
                         }
                         set::Destn::Reserved1 | set::Destn::Reserved2 | set::Destn::Reserved3 | set::Destn::Reserved4 => {
-                            assert!(!self.config.strict, "undefined: set_reserved_destinations")
+                            assert_strict(strict, false, "set_reserved_destinations")
                         }
                     },
                 }
@@ -586,10 +597,10 @@ pub struct Config {
     in_base: PinRange,
     in_count: Range<1, 32>,
     sideset_base: PinRange,
-    sideset_count: Range<0, 5>,
+    pub(crate) sideset_count: Range<0, 5>,
 
     // execctrl
-    sideset_en: bool,
+    pub(crate) sideset_en: bool,
     side_pindir: bool,
     jmp_pin: u5,
     out_enable_bit: Option<u8>,
@@ -609,7 +620,8 @@ pub struct Config {
     rx_get: bool,
     tx_depth: usize,
     rx_depth: usize,
-    pub strict: bool,
+    pinctrl: u32,
+    shiftctrl: u32,
     // TODO clkdiv?
     // clkdiv_int: u16,
     // clkdiv_frac: u8,
@@ -617,25 +629,10 @@ pub struct Config {
 
 impl Config {
     fn new() -> Self {
-        Self::from_registers(0x0001_f000, 0x000c_0000, 0x1400_0000, true)
+        Self::from_registers(0x0001_f000, 0x000c_0000, 0x1400_0000)
     }
-    pub fn from_registers(execctrl: u32, shiftctrl: u32, pinctrl: u32, strict: bool) -> Self {
+    pub fn from_registers(execctrl: u32, shiftctrl: u32, pinctrl: u32) -> Self {
         let field = |register: u32, lsb: u32, bits: u32| ((register >> lsb) & ((1 << bits) - 1)) as u8;
-        assert!(
-            !strict || field(shiftctrl, 16, 1) == 0 || field(shiftctrl, 15, 1) == 0,
-            "undefined: autopush_rx_put"
-        );
-        assert!(
-            !strict || field(shiftctrl, 16, 1) == 0 || field(shiftctrl, 14, 1) == 0,
-            "undefined: autopush_rx_get"
-        );
-        assert!(
-            !strict || field(shiftctrl, 14, 2) == 0 || field(shiftctrl, 30, 2) == 0,
-            "undefined: fjoin_with_rx_putget"
-        );
-        assert!(!strict || field(pinctrl, 20, 6) <= 32, "undefined: out_count_above_32");
-        assert!(!strict || field(pinctrl, 26, 3) <= 5, "undefined: set_count_above_5");
-        assert!(!strict || field(pinctrl, 29, 3) <= 5, "undefined: sideset_count_above_5");
         let join = if field(shiftctrl, 14, 2) == 0 {
             field(shiftctrl, 30, 2) as usize
         } else {
@@ -680,8 +677,21 @@ impl Config {
             rx_get: field(shiftctrl, 14, 1) == 1,
             tx_depth: [4, 8, 0, 0][join],
             rx_depth: [4, 0, 8, 0][join],
-            strict,
+            pinctrl,
+            shiftctrl,
         }
+    }
+    fn check(&self, strict: bool) {
+        assert_strict(strict, !self.autopush || !self.rx_put, "autopush_rx_put");
+        assert_strict(strict, !self.autopush || !self.rx_get, "autopush_rx_get");
+        assert_strict(
+            strict,
+            !(self.rx_put || self.rx_get) || self.shiftctrl >> 30 == 0,
+            "fjoin_with_rx_putget",
+        );
+        assert_strict(strict, self.pinctrl >> 20 & 63 <= 32, "out_count_above_32");
+        assert_strict(strict, self.set_count.get() <= 5, "set_count_above_5");
+        assert_strict(strict, self.pinctrl >> 29 <= 5, "sideset_count_above_5");
     }
     fn calc_pull_thresh(&self) -> u8 {
         if self.pull_thresh.get() == 0 { 32 } else { self.pull_thresh.get() }

@@ -1,3 +1,5 @@
+use crate::assert_strict;
+use crate::state::Config;
 use arbitrary_int::{u1, u2, u5};
 use std::fmt;
 
@@ -97,7 +99,7 @@ pub struct Instr {
 }
 
 impl Instr {
-    pub fn decode(word: u16, side_bits: u8, side_optional: bool, strict: bool) -> Self {
+    pub fn decode(word: u16, config: &Config, strict: bool) -> Self {
         let (a, b) = (((word >> 5) & 7) as usize, (word & 31) as u8);
         let bit = |i: usize| u1::new(((a >> i) & 1) as u8);
         let instruction = match word >> 13 {
@@ -121,21 +123,21 @@ impl Instr {
                 let index = (b >> 3 & 1 == 1).then(|| u2::new(b & 3));
                 match (b >> 4, a & 4, b & 0x0f) {
                     (0, 0, _) => {
-                        assert!(!strict || b == 0, "undefined: push_low_bits");
+                        assert_strict(strict, b == 0, "push_low_bits");
                         Instruction::Push { if_full: bit(1), block: bit(0), index }
                     }
                     (0, _, _) => {
-                        assert!(!strict || b == 0, "undefined: pull_low_bits");
+                        assert_strict(strict, b == 0, "pull_low_bits");
                         Instruction::Pull { if_empty: bit(1), block: bit(0) }
                     }
-                    (_, 0, 1..8) if strict => panic!("undefined: put_y_index_nonzero"),
-                    (_, _, 1..8) if strict => panic!("undefined: get_y_index_nonzero"),
-                    (_, 0, _) => {
-                        assert!(!strict || a == 0, "undefined: put_bits_6_5");
+                    (_, 0, low) => {
+                        assert_strict(strict, !(1..8).contains(&low), "put_y_index_nonzero");
+                        assert_strict(strict, a == 0, "put_bits_6_5");
                         Instruction::MovToRx { if_full: bit(1), block: bit(0), index }
                     }
-                    _ => {
-                        assert!(!strict || a == 4, "undefined: get_bits_6_5");
+                    (_, _, low) => {
+                        assert_strict(strict, !(1..8).contains(&low), "get_y_index_nonzero");
+                        assert_strict(strict, a == 4, "get_bits_6_5");
                         Instruction::MovFromRx { if_empty: bit(1), block: bit(0), index }
                     }
                 }
@@ -167,7 +169,7 @@ impl Instr {
                 }
             }
             6 => {
-                assert!(!strict || a < 4, "undefined: irq_bit_7");
+                assert_strict(strict, a < 4, "irq_bit_7");
                 Instruction::Irq { clear: bit(1), wait: bit(0), index: u5::new(b) }
             }
             _ => {
@@ -176,11 +178,11 @@ impl Instr {
             }
         };
 
-        let side_bits = side_bits.min(5);
+        let side_bits = config.sideset_count.get();
         let field = ((word >> 8) & 31) as u8;
         let delay_bits = 5 - side_bits;
         let side = field >> delay_bits;
-        let side_set = match (side_bits, side_optional) {
+        let side_set = match (side_bits, config.sideset_en) {
             (0, _) => None,
             (_, true) if side >> (side_bits - 1) == 0 => None,
             (_, true) => Some(side & !(1 << (side_bits - 1))),

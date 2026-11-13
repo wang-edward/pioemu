@@ -189,12 +189,14 @@ fn emulate(request: &Request, strict: bool) -> Vec<String> {
     words[request.origin as usize..][..request.len].copy_from_slice(&request.code[..request.len]);
     words[MAX_WORDS..].fill(MARKER_NOP);
     let mut block = Block::new();
+    block.strict = strict;
+    let config = Config::from_registers(request.execctrl, request.shiftctrl, request.pinctrl);
     for (instr, word) in block.instr_mem.iter_mut().zip(words) {
-        *instr = Some(Instr::decode(word, request.side_bits(), request.side_optional(), strict));
+        *instr = Some(Instr::decode(word, &config, strict));
     }
 
     let [test, marker, ..] = &mut block.sms;
-    test.config = Config::from_registers(request.execctrl, request.shiftctrl, request.pinctrl, strict);
+    test.config = config;
     test.state.pc = u5::new(request.origin);
     for word in &request.tx[..request.tx_len] {
         test.write_tx(*word);
@@ -208,7 +210,7 @@ fn emulate(request: &Request, strict: bool) -> Vec<String> {
     test.state.rx_putget = request.rx;
     block.irq_flags = request.irq;
     block.gpio_in = request.gpio_in;
-    marker.config = Config::from_registers(MARKER_EXECCTRL, 0x000c_0000, 0, strict);
+    marker.config = Config::from_registers(MARKER_EXECCTRL, 0x000c_0000, 0);
     marker.state.pc = u5::new(MAX_WORDS as u8);
     test.enabled = true;
     marker.enabled = true;
@@ -493,11 +495,9 @@ fn disassemble(request: &Request) -> String {
         request.gpio_in,
         request.rx
     );
+    let config = Config::from_registers(request.execctrl, request.shiftctrl, request.pinctrl);
     for (slot, word) in (request.origin as usize..).zip(&request.code[..request.len]) {
-        text += &format!(
-            "  {slot:2}: {word:04x}  {}\n",
-            Instr::decode(*word, request.side_bits(), request.side_optional(), false)
-        );
+        text += &format!("  {slot:2}: {word:04x}  {}\n", Instr::decode(*word, &config, false));
     }
     text
 }
@@ -574,8 +574,8 @@ mod tests {
     fn undefined_names_are_cases() {
         let names: Vec<&str> = cases::cases().into_iter().map(|(name, ..)| name).collect();
         for source in [include_str!("../../pioemu/src/state.rs"), include_str!("../../pioemu/src/instr.rs")] {
-            for (_, rest) in source.match_indices("undefined: ").map(|(index, _)| source.split_at(index + 11)) {
-                let name = rest.split(|c: char| !c.is_ascii_alphanumeric() && c != '_').next().unwrap();
+            for call in source.split("assert_strict(").skip(1) {
+                let name = call.split('"').nth(1).unwrap();
                 assert!(names.contains(&name), "undefined: {name} is not in the case table");
             }
         }
