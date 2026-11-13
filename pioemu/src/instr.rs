@@ -1,3 +1,5 @@
+use crate::assert_strict;
+use crate::state::Config;
 use arbitrary_int::{u1, u2, u5};
 use std::fmt;
 
@@ -57,12 +59,15 @@ pub enum Instruction {
     Push {
         if_full: u1,
         block: u1,
+        index: Option<u2>,
     },
     Pull {
         if_empty: u1,
         block: u1,
     },
     MovToRx {
+        if_full: u1,
+        block: u1,
         index: Option<u2>,
     },
     MovFromRx {
@@ -94,7 +99,7 @@ pub struct Instr {
 }
 
 impl Instr {
-    pub fn decode(word: u16, side_bits: u8, side_optional: bool) -> Self {
+    pub fn decode(word: u16, config: &Config, strict: bool) -> Self {
         let (a, b) = (((word >> 5) & 7) as usize, (word & 31) as u8);
         let bit = |i: usize| u1::new(((a >> i) & 1) as u8);
         let instruction = match word >> 13 {
@@ -117,11 +122,24 @@ impl Instr {
             4 => {
                 let index = (b >> 3 & 1 == 1).then(|| u2::new(b & 3));
                 match (b >> 4, a & 4, b & 0x0f) {
-                    (0, 0, _) => Instruction::Push { if_full: bit(1), block: bit(0) },
-                    (0, _, _) => Instruction::Pull { if_empty: bit(1), block: bit(0) },
-                    (_, _, 1..8) => panic!("undefined: {word:04x} indexes the RX FIFO by Y with a nonzero index"),
-                    (_, 0, _) => Instruction::MovToRx { index },
-                    _ => Instruction::MovFromRx { if_empty: bit(1), block: bit(0), index },
+                    (0, 0, _) => {
+                        assert_strict(strict, b == 0, "push_low_bits");
+                        Instruction::Push { if_full: bit(1), block: bit(0), index }
+                    }
+                    (0, _, _) => {
+                        assert_strict(strict, b == 0, "pull_low_bits");
+                        Instruction::Pull { if_empty: bit(1), block: bit(0) }
+                    }
+                    (_, 0, low) => {
+                        assert_strict(strict, !(1..8).contains(&low), "put_y_index_nonzero");
+                        assert_strict(strict, a == 0, "put_bits_6_5");
+                        Instruction::MovToRx { if_full: bit(1), block: bit(0), index }
+                    }
+                    (_, _, low) => {
+                        assert_strict(strict, !(1..8).contains(&low), "get_y_index_nonzero");
+                        assert_strict(strict, a == 4, "get_bits_6_5");
+                        Instruction::MovFromRx { if_empty: bit(1), block: bit(0), index }
+                    }
                 }
             }
             5 => {
@@ -150,18 +168,21 @@ impl Instr {
                     ][(b & 7) as usize],
                 }
             }
-            6 => Instruction::Irq { clear: bit(1), wait: bit(0), index: u5::new(b) },
+            6 => {
+                assert_strict(strict, a < 4, "irq_bit_7");
+                Instruction::Irq { clear: bit(1), wait: bit(0), index: u5::new(b) }
+            }
             _ => {
                 use set::Destn::*;
                 Instruction::Set { destn: [Pins, X, Y, Reserved1, PinDirs, Reserved2, Reserved3, Reserved4][a], data: u5::new(b) }
             }
         };
 
-        assert!(side_bits <= 5, "undefined: SIDESET_COUNT {side_bits} above 5");
+        let side_bits = config.sideset_count.get();
         let field = ((word >> 8) & 31) as u8;
         let delay_bits = 5 - side_bits;
         let side = field >> delay_bits;
-        let side_set = match (side_bits, side_optional) {
+        let side_set = match (side_bits, config.sideset_en) {
             (0, _) => None,
             (_, true) if side >> (side_bits - 1) == 0 => None,
             (_, true) => Some(side & !(1 << (side_bits - 1))),
@@ -220,7 +241,7 @@ impl fmt::Display for Instruction {
                 let n = if bit_count.value() == 0 { 32 } else { bit_count.value() as u32 };
                 write!(f, "out {}, {}", dst, n)
             }
-            Instruction::Push { if_full, block } => {
+            Instruction::Push { if_full, block, .. } => {
                 let iffull = if if_full.value() == 1 { " iffull" } else { "" };
                 let blk = if block.value() == 0 { " noblock" } else { "" };
                 write!(f, "push{}{}", iffull, blk)
@@ -230,7 +251,7 @@ impl fmt::Display for Instruction {
                 let blk = if block.value() == 0 { " noblock" } else { "" };
                 write!(f, "pull{}{}", ifempty, blk)
             }
-            Instruction::MovToRx { index } => match index {
+            Instruction::MovToRx { index, .. } => match index {
                 Some(index) => write!(f, "mov rxfifo[{}], isr", index.value()),
                 None => write!(f, "mov rxfifo[y], isr"),
             },

@@ -8,8 +8,11 @@ use pioemu::state::{Block, Config};
 use pioemu_protocol::{CSV_HEADER, MAX_TX, MAX_WORDS, Request, osr_reachable};
 use serialport::{SerialPort, SerialPortType};
 
+mod cases;
+
 const RANDOM_TICKS: u32 = 32;
 const RANDOM_MAX_LEN: u64 = 8;
+const RECORD_RUNS: u64 = 50;
 const MARKER_NOP: u16 = 0xa042;
 const MARKER_EXECCTRL: u32 = (MAX_WORDS as u32) << 7 | (MAX_WORDS as u32 + 1) << 12;
 
@@ -22,6 +25,37 @@ fn main() -> Result<(), Box<dyn Error>> {
             Ok(())
         }
         ["sweep", state] => run(sweep(state.parse()?)),
+        ["record-cases"] => {
+            let mut hardware = Hardware::open()?;
+            let mut nondeterministic = Vec::new();
+            for (name, request) in cases::cases().into_iter().filter_map(|(name, _, _, test)| match test {
+                cases::Test::Pass(request) => Some((name, request)),
+                cases::Test::Untestable(reason) => {
+                    println!("{name}: not testable, {reason}");
+                    None
+                }
+            }) {
+                let trace = hardware.run(&request)?;
+                for seed in 1..RECORD_RUNS {
+                    let (mut code, mut rng) = (request.code, Rng(seed));
+                    for word in &mut code[request.len..] {
+                        *word = random_word(&mut rng, 0, MAX_WORDS);
+                    }
+                    if hardware.run(&Request { len: MAX_WORDS, code, ..request })? != trace {
+                        nondeterministic.push(name);
+                        break;
+                    }
+                }
+                let mut fixture = String::new();
+                request.write(&mut fixture)?;
+                fixture += &format!("{CSV_HEADER}\n{}\n", trace.join("\n"));
+                std::fs::write(format!("{}/cases/{name}.csv", env!("CARGO_MANIFEST_DIR")), fixture)?;
+            }
+            match nondeterministic.as_slice() {
+                [] => Ok(()),
+                names => Err(format!("traces differ between runs: {}", names.join(", ")).into()),
+            }
+        }
         [count] | [count, _] => {
             let seed = match args.get(1) {
                 Some(seed) => seed.parse()?,
@@ -32,7 +66,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 .collect())
         }
         _ => Err(format!(
-            "usage: difftest <count> [seed] | difftest sweep <0..{}> | difftest bootsel",
+            "usage: difftest <count> [seed] | difftest sweep <0..{}> | difftest record-cases | difftest bootsel",
             SWEEP_STATES.len() - 1
         )
         .into()),
@@ -42,23 +76,12 @@ fn main() -> Result<(), Box<dyn Error>> {
 fn run(requests: Vec<(String, Request)>) -> Result<(), Box<dyn Error>> {
     let mut hardware = Hardware::open()?;
     let mut failed = Vec::new();
-    let mut undefined = 0;
     let start = Instant::now();
     std::panic::set_hook(Box::new(|_| {}));
     for (index, (label, request)) in requests.iter().enumerate() {
-        let failure = match std::panic::catch_unwind(|| emulate(request)) {
+        let failure = match std::panic::catch_unwind(|| emulate(request, false)) {
             Ok(emulator) => first_difference(&hardware.run(request)?, &emulator),
-            Err(payload) => match payload
-                .downcast_ref::<String>()
-                .map(String::as_str)
-                .or(payload.downcast_ref::<&str>().copied())
-            {
-                Some(message) if message.starts_with("undefined") => {
-                    undefined += 1;
-                    None
-                }
-                message => Some(format!("Emulator panicked: {}\n", message.unwrap_or("?"))),
-            },
+            Err(payload) => Some(format!("Emulator panicked: {}\n", panic_message(&*payload))),
         };
         if let Some(failure) = failure {
             failed.push(label.as_str());
@@ -71,11 +94,7 @@ fn run(requests: Vec<(String, Request)>) -> Result<(), Box<dyn Error>> {
             (index + 1) as f64 / start.elapsed().as_secs_f64()
         );
     }
-    println!(
-        "\n{} of {} programs matched, {undefined} hit undefined behaviour",
-        requests.len() - failed.len() - undefined,
-        requests.len()
-    );
+    println!("\n{} of {} programs matched", requests.len() - failed.len(), requests.len());
     if failed.is_empty() {
         Ok(())
     } else {
@@ -157,17 +176,27 @@ impl Hardware {
     }
 }
 
-fn emulate(request: &Request) -> Vec<String> {
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> &str {
+    payload
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or(payload.downcast_ref::<&str>().copied())
+        .unwrap_or("?")
+}
+
+fn emulate(request: &Request, strict: bool) -> Vec<String> {
     let mut words = [0u16; 32];
     words[request.origin as usize..][..request.len].copy_from_slice(&request.code[..request.len]);
     words[MAX_WORDS..].fill(MARKER_NOP);
-    let mut block = Block::new();
+    let mut block = Block::new(strict);
+    let config = Config::from_registers(request.execctrl, request.shiftctrl, request.pinctrl);
     for (instr, word) in block.instr_mem.iter_mut().zip(words) {
-        *instr = Some(Instr::decode(word, request.side_bits(), request.side_optional()));
+        *instr = Some(Instr::decode(word, &config, strict));
     }
 
+    block.configure(0, request.execctrl, request.shiftctrl, request.pinctrl);
+    block.configure(1, MARKER_EXECCTRL, 0x000c_0000, 0);
     let [test, marker, ..] = &mut block.sms;
-    test.config = Config::from_registers(request.execctrl, request.shiftctrl, request.pinctrl);
     test.state.pc = u5::new(request.origin);
     for word in &request.tx[..request.tx_len] {
         test.write_tx(*word);
@@ -181,7 +210,6 @@ fn emulate(request: &Request) -> Vec<String> {
     test.state.rx_putget = request.rx;
     block.irq_flags = request.irq;
     block.gpio_in = request.gpio_in;
-    marker.config = Config::from_registers(MARKER_EXECCTRL, 0x000c_0000, 0);
     marker.state.pc = u5::new(MAX_WORDS as u8);
     test.enabled = true;
     marker.enabled = true;
@@ -265,7 +293,7 @@ fn random_word(rng: &mut Rng, origin: u8, len: usize) -> u16 {
         2 => (2, rng.below(8), rng.below(32)),
         3 => (3, rng.below(8), rng.below(32)),
         4 => match rng.below(3) {
-            0 => (4, rng.below(8), 0x10 | rng.below(2) * (8 | rng.below(8))),
+            0 => (4, rng.below(8), 0x10 | rng.below(16)),
             _ => (4, rng.below(8), rng.below(16)),
         },
         5 => (5, rng.below(8), rng.below(32)),
@@ -296,10 +324,9 @@ fn random_request(rng: &mut Rng) -> Request {
     let side_en = if side_count > 0 { field(2, 30) } else { 0 };
     let execctrl = field(32, 0) | field(4, 5) | field(128, 17) | field(32, 24) | wrap_bottom << 7 | wrap_top << 12 | field(2, 29) | side_en;
     let putget = if field(2, 0) == 0 { field(4, 14) } else { 0 };
-    let autopush = if putget == 0 { field(2, 16) } else { 0 };
-    let shiftctrl = field(32, 0) | putget | autopush | field(8, 17) | field(32, 20) | field(32, 25) | field(4, 30);
+    let shiftctrl = field(32, 0) | putget | field(16, 16) | field(32, 20) | field(32, 25) | field(4, 30);
     let set_count = if field(16, 0) == 0 { 6 | field(2, 0) } else { field(6, 0) };
-    let pinctrl = field(32, 0) | field(32, 5) | field(32, 10) | field(32, 15) | field(33, 20) | set_count << 26 | side_count << 29;
+    let pinctrl = field(32, 0) | field(32, 5) | field(32, 10) | field(32, 15) | field(64, 20) | set_count << 26 | side_count << 29;
     let mut request = Request {
         ticks: RANDOM_TICKS,
         execctrl,
@@ -323,6 +350,9 @@ fn random_request(rng: &mut Rng) -> Request {
     request.osr = osr_reachable(request.osr, request.osr_count, request.out_shift_right());
     for word in &mut request.code[..len] {
         *word = random_word(rng, origin, len);
+        if *word >> 13 == 4 && *word & 0x90 == 0x90 && shiftctrl & (1 << 30 | 3 << 14) == 1 << 30 {
+            *word &= !0x10;
+        }
     }
     for word in &mut request.tx[..request.tx_len] {
         *word = random_value(rng, origin, len);
@@ -464,11 +494,9 @@ fn disassemble(request: &Request) -> String {
         request.gpio_in,
         request.rx
     );
+    let config = Config::from_registers(request.execctrl, request.shiftctrl, request.pinctrl);
     for (slot, word) in (request.origin as usize..).zip(&request.code[..request.len]) {
-        text += &format!(
-            "  {slot:2}: {word:04x}  {}\n",
-            Instr::decode(*word, request.side_bits(), request.side_optional())
-        );
+        text += &format!("  {slot:2}: {word:04x}  {}\n", Instr::decode(*word, &config, false));
     }
     text
 }
@@ -499,7 +527,7 @@ mod tests {
             rx: [0; 4],
         };
         request.code[..3].copy_from_slice(&[0xf823, 0x0245, 0x80a0]);
-        let rows = emulate(&request);
+        let rows = emulate(&request, true);
         let field = |tick: usize, column: &str| {
             let index = CSV_HEADER.split(',').position(|c| c == column).unwrap();
             rows[tick - 1].split(',').nth(index).unwrap().to_owned()
@@ -511,32 +539,85 @@ mod tests {
         assert_eq!(field(16, "test_pc"), "6");
     }
     #[test]
+    fn cases_match_fixtures() {
+        let failures: Vec<String> = cases::cases()
+            .into_iter()
+            .filter_map(|(name, _, _, test)| match test {
+                cases::Test::Pass(request) => {
+                    let fixture = std::fs::read_to_string(format!("{}/cases/{name}.csv", env!("CARGO_MANIFEST_DIR"))).unwrap();
+                    let mut wire = String::new();
+                    request.write(&mut wire).unwrap();
+                    let lines: Vec<String> = fixture.lines().map(str::to_owned).collect();
+                    assert_eq!(lines[..2], [wire.trim_end(), CSV_HEADER], "{name}: re-run record-cases");
+                    first_difference(&lines[2..], &emulate(&request, false)).map(|difference| format!("{name}: {difference}"))
+                }
+                cases::Test::Untestable(_) => None,
+            })
+            .collect();
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+    #[test]
+    fn strict_cases_panic_with_their_name() {
+        for (name, _, kind, test) in cases::cases() {
+            if let cases::Test::Pass(request) = test {
+                let panic = std::panic::catch_unwind(|| emulate(&request, true)).err();
+                let expected = match kind {
+                    cases::Kind::Contradicts(_) => None,
+                    cases::Kind::Undefined(_) | cases::Kind::Undocumented => Some(format!("undefined: {name}")),
+                };
+                assert_eq!(panic.as_deref().map(panic_message), expected.as_deref(), "{name}");
+            }
+        }
+    }
+    #[test]
+    fn undefined_names_are_cases() {
+        let names: Vec<&str> = cases::cases().into_iter().map(|(name, ..)| name).collect();
+        for source in [include_str!("../../pioemu/src/state.rs"), include_str!("../../pioemu/src/instr.rs")] {
+            for call in source.split("assert_strict(").skip(1) {
+                let name = call.split('"').nth(1).unwrap();
+                assert!(names.contains(&name), "undefined: {name} is not in the case table");
+            }
+        }
+    }
+    #[test]
+    fn quotes_are_in_datasheet() {
+        let datasheet = include_str!("../../datasheet/rp2350.txt")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        for (name, _, kind, _) in cases::cases() {
+            if let cases::Kind::Undefined(quote) | cases::Kind::Contradicts(quote) = kind {
+                let quote = quote.split_whitespace().collect::<Vec<_>>().join(" ");
+                assert!(datasheet.contains(&quote), "{name}: {quote}");
+            }
+        }
+    }
+    #[test]
+    fn sections_are_in_datasheet() {
+        let datasheet = include_str!("../../datasheet/rp2350.txt");
+        for (name, section, ..) in cases::cases() {
+            assert!(
+                datasheet.lines().any(|line| line.starts_with(&format!("{section}. "))),
+                "{name}: {section}"
+            );
+        }
+    }
+    #[test]
     fn random_requests_are_valid() {
         for seed in 0..10_000 {
             let request = random_request(&mut Rng(seed));
             request.validate().unwrap();
-            if request.side_bits() <= 5 {
-                disassemble(&request);
-            }
+            disassemble(&request);
         }
     }
     #[test]
     fn sweep_requests_are_valid() {
         for state in 0..SWEEP_STATES.len() {
-            for (label, request) in sweep(state) {
+            for (_, request) in sweep(state) {
                 let mut wire = String::new();
                 request.write(&mut wire).unwrap();
                 assert_eq!(Request::parse(wire.trim_end()).as_ref(), Ok(&request));
-                if let Err(payload) = std::panic::catch_unwind(|| emulate(&request)) {
-                    let message = payload
-                        .downcast_ref::<String>()
-                        .map(String::as_str)
-                        .or(payload.downcast_ref::<&str>().copied());
-                    assert!(
-                        message.is_some_and(|message| message.starts_with("undefined")),
-                        "state {state} {label}: {message:?}"
-                    );
-                }
+                emulate(&request, false);
             }
         }
     }

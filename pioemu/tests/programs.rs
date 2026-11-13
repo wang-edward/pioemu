@@ -82,7 +82,7 @@ macro_rules! pio {
 }
 
 fn setup(program: &[instr::Instr], en: [bool; 4]) -> state::Block {
-    let mut block = state::Block::new();
+    let mut block = state::Block::new(true);
     for (i, instr) in program.iter().enumerate() {
         block.instr_mem[i] = Some(*instr);
     }

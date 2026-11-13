@@ -83,6 +83,7 @@ fn main() -> ! {
     }
     let registers = unsafe { &*pac::PIO0::ptr() };
     let mut decoder = Decoder::default();
+    let mut seed = 0x2545_f491;
 
     let mut receive_buffer = [0u8; 64];
 
@@ -125,7 +126,7 @@ fn main() -> ! {
                 if !serial.dtr() {
                     break;
                 }
-                reset_and_initialize(&peripherals.RESETS, registers, &request);
+                reset_and_initialize(&peripherals.RESETS, registers, &request, &mut seed);
 
                 let overran = (0..ticks_elapsed).any(|_| {
                     let previous_marker_pc = registers.sm(1).sm_addr().read().bits();
@@ -217,11 +218,37 @@ fn main() -> ! {
     }
 }
 
-fn reset_and_initialize(resets: &pac::RESETS, registers: &pac::pio0::RegisterBlock, request: &Request) {
+fn reset_and_initialize(resets: &pac::RESETS, registers: &pac::pio0::RegisterBlock, request: &Request, seed: &mut u32) {
     resets.reset().modify(|_, w| w.pio0().set_bit());
     resets.reset().modify(|_, w| w.pio0().clear_bit());
     while resets.reset_done().read().pio0().bit_is_clear() {
         spin_loop();
+    }
+
+    let mut junk = || {
+        *seed ^= *seed << 13;
+        *seed ^= *seed >> 17;
+        *seed ^= *seed << 5;
+        *seed
+    };
+    for sm in 1..4 {
+        registers.sm(sm).sm_shiftctrl().write(|w| unsafe { w.bits(1 << 14) });
+        for instruction in [0xe020 | junk() & 31, 0xe040 | junk() & 31, 0xa0c9, 0xa0f2] {
+            registers.sm(sm).sm_instr().write(|w| unsafe { w.bits(instruction) });
+        }
+    }
+    for index in 0..4 {
+        let words = [junk(), junk(), junk()];
+        registers.rxf1_putget(index).write(|w| unsafe { w.bits(words[0]) });
+        registers.rxf2_putget(index).write(|w| unsafe { w.bits(words[1]) });
+        registers.rxf3_putget(index).write(|w| unsafe { w.bits(words[2]) });
+    }
+    for sm in 2..4 {
+        let words = [junk(), junk(), junk(), junk()];
+        registers.sm(sm).sm_clkdiv().write(|w| unsafe { w.bits(words[0]) });
+        registers.sm(sm).sm_execctrl().write(|w| unsafe { w.bits(words[1]) });
+        registers.sm(sm).sm_shiftctrl().write(|w| unsafe { w.bits(words[2]) });
+        registers.sm(sm).sm_pinctrl().write(|w| unsafe { w.bits(words[3]) });
     }
 
     let mut code = [0u16; MARKER_ORIGIN];
