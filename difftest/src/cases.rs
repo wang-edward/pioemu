@@ -76,6 +76,8 @@ pub fn cases() -> Vec<(&'static str, &'static str, Kind, Test)> {
         ("mov_osr_autopull", "11.5.4.2", Undefined("Note that a MOV from the OSR is undefined whilst autopull is enabled"), Pass(program(&[0x6028, 0xa047], Sm { shiftctrl: 16 << 25 | 1 << 17, ..BASE }))),
         ("set_count_above_5", "11.7", Undefined("SET_COUNT: The number of pins asserted by a SET. In the range 0 to 5 inclusive."), Pass(program(&[0xa001, 0xe080], Sm { pinctrl: 7 << 26, ..BASE }))),
         ("sideset_count_above_5", "11.7", Undefined("Minimum of 0 (all delay bits, no side-set) and maximum of 5 (all side-set, no delay)."), Pass(program(&[0xe01f, 0xbf42], Sm { pinctrl: 7 << 29 | 5 << 26, ..BASE }))),
+        ("sideset_en_count_0", "11.7", Undocumented, Pass(Request { ticks: 48, ..program(&[0xa00b, 0xa06b, 0xf121, 0xe122, 0xf023, 0xe024], Sm { execctrl: 1 << 30, pinctrl: 32 << 20 | 4 << 10, ..BASE }) })),
+        ("clkdiv_int_0_frac_nonzero", "11.7", Undefined("If INT is 0, FRAC must also be 0."), Untestable("one tick takes at least 65536 system clocks, beyond what the firmware's nop routine timing can reach")),
         ("out_count_above_32", "11.7", Undefined("OUT_COUNT: The number of pins asserted by an OUT PINS, OUT PINDIRS or MOV PINS instruction. In the range 0 to 32 inclusive."), Pass(program(&[0x6000, 0xa06b], Sm { pinctrl: 40 << 20 | 4, ..BASE }))),
         ("fjoin_with_rx_putget", "11.7", Undocumented, Pass(program(&[0x80a0, 0x80a0], Sm { shiftctrl: 1 << 31 | 1 << 15, ..BASE }))),
         ("out_exec_delay", "11.4.5.2", Contradicts("Delay cycles on the initial OUT are ignored, but the executee may insert delay cycles as normal."), Pass(program(&[0x63e0], Sm { osr: 0xe021, ..BASE }))),

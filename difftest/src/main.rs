@@ -353,8 +353,7 @@ fn random_sm(rng: &mut Rng, pins: u64, code: &mut [u16; 32]) -> Sm {
         _ => (1 + field(3, 0)) << 16 | field(2, 0) * field(256, 8),
     };
     let side_count = if field(16, 0) == 0 { 6 | field(2, 0) } else { field(6, 0) };
-    let side_en = if side_count > 0 { field(2, 30) } else { 0 };
-    let execctrl = field(32, 0) | field(4, 5) | field(128, 17) | field(32, 24) | wrap_bottom << 7 | wrap_top << 12 | field(2, 29) | side_en;
+    let execctrl = field(32, 0) | field(4, 5) | field(128, 17) | field(32, 24) | wrap_bottom << 7 | wrap_top << 12 | field(4, 29);
     let putget = if field(2, 0) == 0 { field(4, 14) } else { 0 };
     let shiftctrl = field(32, 0) | putget | field(16, 16) | field(32, 20) | field(32, 25) | field(4, 30);
     let set_count = if field(16, 0) == 0 { 6 | field(2, 0) } else { field(6, 0) };

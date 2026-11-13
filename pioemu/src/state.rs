@@ -62,6 +62,16 @@ impl Block {
         assert_strict(self.strict, field(pinctrl, 20, 6) <= 32, "out_count_above_32");
         assert_strict(self.strict, field(pinctrl, 26, 3) <= 5, "set_count_above_5");
         assert_strict(self.strict, field(pinctrl, 29, 3) <= 5, "sideset_count_above_5");
+        assert_strict(
+            self.strict,
+            field(execctrl, 30, 1) == 0 || field(pinctrl, 29, 3) > 0,
+            "sideset_en_count_0",
+        );
+        assert_strict(
+            self.strict,
+            field(clkdiv, 16, 16) > 0 || field(clkdiv, 8, 8) == 0,
+            "clkdiv_int_0_frac_nonzero",
+        );
         self.sms[sm].config = Config::from_registers(clkdiv, execctrl, shiftctrl, pinctrl);
     }
     pub fn step(&mut self) {
@@ -162,8 +172,8 @@ impl StateMachine {
                 let exec = self.state.exec.take();
                 self.state.stalled = false;
                 let status = match self.config.status {
-                    Status::TxLevel(n) => self.state.tx_fifo.len() < n as usize,
-                    Status::RxLevel(n) => self.state.rx_fifo.len() < n as usize,
+                    Status::TxLevel(n) => self.state.tx_fifo.len() < (n & 15) as usize,
+                    Status::RxLevel(n) => self.state.rx_fifo.len() < (n & 15) as usize,
                     Status::Irq(n) => bit_at(irq_flags, n),
                     Status::Reserved => false,
                 };
@@ -496,7 +506,7 @@ impl StateMachine {
                     },
                 }
 
-                let side_count = self.config.sideset_count.get() - self.config.sideset_en as u8;
+                let side_count = self.config.sideset_count.get().saturating_sub(self.config.sideset_en as u8);
                 let side_write = instr.side_set.map(|value| {
                     (
                         self.config.side_pindir,
@@ -660,8 +670,8 @@ impl Config {
             wrap_top: u5::new(field(execctrl, 12, 5)),
             wrap_bottom: u5::new(field(execctrl, 7, 5)),
             status: match field(execctrl, 5, 2) {
-                0 => Status::TxLevel(field(execctrl, 0, 4)),
-                1 => Status::RxLevel(field(execctrl, 0, 4)),
+                0 => Status::TxLevel(field(execctrl, 0, 5)),
+                1 => Status::RxLevel(field(execctrl, 0, 5)),
                 2 => Status::Irq(field(execctrl, 0, 5)),
                 _ => Status::Reserved,
             },

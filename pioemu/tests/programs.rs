@@ -152,3 +152,11 @@ fn disassembly() {
     assert_eq!(text(0x2065), "wait 0 jmppin + 5");
     assert_eq!(text(0x2083), "wait 1 gpio 3");
 }
+
+#[test]
+#[should_panic(expected = "undefined: status_level_above_depth")]
+fn status_level_bit_4_is_checked() {
+    let mut block = setup(&[0xa025], [true, false, false, false]);
+    block.configure(0, 0x0001_0000, 0x10, 0x000c_0000, 0x1400_0000);
+    block.step();
+}
