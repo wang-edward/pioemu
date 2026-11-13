@@ -7,7 +7,7 @@ use core::hint::spin_loop;
 use hal::{entry, pac};
 use heapless::String;
 use panic_halt as _;
-use pioemu_protocol::{CSV_HEADER, Decoder, Request};
+use pioemu_protocol::{CSV_HEADER, Decoder, MAX_TICKS, Request, Sm};
 use rp235x_hal as hal;
 use rp235x_hal::clocks::init_clocks_and_plls;
 use usb_device::LangID;
@@ -15,26 +15,12 @@ use usb_device::bus::UsbBusAllocator;
 use usb_device::device::{StringDescriptors, UsbDevice, UsbDeviceBuilder, UsbVidPid};
 use usbd_serial::{SerialPort, USB_CLASS_CDC};
 
-const CLOCK_DIVIDER: u16 = 1_000;
-const MARKER_ORIGIN: usize = 30;
+const STR_R1_R0: u32 = 0x1000_f8c0;
+const NOP_W: u32 = 0x8000_f3af;
+const STR_R2_R0: u32 = 0x2000_f8c0;
+const BX_LR: u32 = 0x4770;
 
-#[derive(Clone, Copy)]
-struct SmConfig {
-    clkdiv: u32,
-    execctrl: u32,
-    shiftctrl: u32,
-    pinctrl: u32,
-}
-
-struct Snapshot {
-    test_pc: u32,
-    marker_pc: u32,
-    padout: u32,
-    padoe: u32,
-    irq: u8,
-    flevel: u32,
-    fdebug: u32,
-}
+static mut RUN: [u32; MAX_TICKS as usize + 2] = [0; MAX_TICKS as usize + 2];
 
 /// Tell the RP2350 Boot ROM about this application.
 #[unsafe(link_section = ".start_block")]
@@ -122,90 +108,43 @@ fn main() -> ! {
             for (pin, gpio) in peripherals.IO_BANK0.gpio_iter().take(32).enumerate() {
                 gpio.gpio_ctrl().write(|w| unsafe { w.inover().bits(2 | (request.gpio_in >> pin) as u8 & 1) });
             }
-            for ticks_elapsed in 1..=request.ticks {
+            'ticks: for ticks_elapsed in 1..=request.ticks {
                 if !serial.dtr() {
                     break;
                 }
                 reset_and_initialize(&peripherals.RESETS, registers, &request, &mut seed);
+                cortex_m::interrupt::free(|_| run(registers.ctrl().as_ptr(), request.mask() as u32 | 0xf << 8, ticks_elapsed));
+                usb.poll(&mut [&mut serial]);
 
-                let overran = (0..ticks_elapsed).any(|_| {
-                    let previous_marker_pc = registers.sm(1).sm_addr().read().bits();
-                    cortex_m::interrupt::free(|_| {
-                        // Enable/disable both SMs in the same write. The divider is
-                        // deliberately slow enough to stop before the next tick.
-                        registers.ctrl().write(|w| unsafe { w.bits(0b11) });
-                        while registers.sm(1).sm_addr().read().bits() == previous_marker_pc {
-                            spin_loop();
-                        }
-                        registers.ctrl().write(|w| unsafe { w.bits(0) });
-                    });
-                    // Replays can be long; keep USB serviced between ticks.
-                    usb.poll(&mut [&mut serial]);
-                    registers.sm(1).sm_addr().read().bits() == previous_marker_pc
-                });
-                if overran {
-                    send(&mut usb, &mut serial, b"ERR clock divider too fast to stop after one tick\r\n");
-                    break;
-                }
-
-                // Save non-destructive state before the diagnostic instructions alter SM0.
-                let snapshot = Snapshot {
-                    test_pc: registers.sm(0).sm_addr().read().bits(),
-                    marker_pc: registers.sm(1).sm_addr().read().bits(),
-                    padout: registers.dbg_padout().read().bits(),
-                    padoe: registers.dbg_padoe().read().bits(),
-                    irq: registers.irq().read().bits() as u8,
-                    flevel: registers.flevel().read().bits(),
-                    fdebug: registers.fdebug().read().bits(),
-                };
-
-                let putget = registers.sm(0).sm_shiftctrl().read().bits() >> 14 & 3;
-                if putget != 0 {
-                    registers.sm(0).sm_shiftctrl().modify(|r, w| unsafe { w.bits(r.bits() & !(1 << 14) | 1 << 15) });
-                }
-                let mut rx_words = [0u32; 4];
-                if putget != 0 {
-                    for (index, word) in rx_words.iter_mut().enumerate() {
-                        *word = registers.rxf0_putget(index).read().bits();
-                    }
-                }
-                let mut rx_count = 0usize;
-                while putget == 0 && registers.fstat().read().rxempty().bits() & 1 == 0 {
-                    let word = registers.rxf(0).read().bits();
-                    if rx_count < rx_words.len() {
-                        rx_words[rx_count] = word;
-                    }
-                    rx_count += 1;
-                }
-
-                let Some(hidden) = extract_hidden_registers(registers) else {
-                    send(&mut usb, &mut serial, b"ERR register extraction failed\r\n");
-                    break;
-                };
-
-                let mut line = String::<320>::new();
-                writeln!(
+                let pcs: [u32; 4] = core::array::from_fn(|index| registers.sm(index).sm_addr().read().bits());
+                let mut line = String::<512>::new();
+                write!(
                     line,
-                    "{},{},{},{:08x},{:08x},{:02x},{:08x},{:08x},{},{:08x},{:08x},{:08x},{:08x},{:08x},{:08x},{:08x},{:08x}\r",
+                    "{},{:08x},{:08x},{:02x},{:08x},{:08x}",
                     ticks_elapsed,
-                    snapshot.test_pc,
-                    snapshot.marker_pc,
-                    snapshot.padout,
-                    snapshot.padoe,
-                    snapshot.irq,
-                    snapshot.flevel,
-                    snapshot.fdebug,
-                    rx_count,
-                    rx_words[0],
-                    rx_words[1],
-                    rx_words[2],
-                    rx_words[3],
-                    hidden[1],
-                    hidden[2],
-                    hidden[0],
-                    hidden[3],
+                    registers.dbg_padout().read().bits(),
+                    registers.dbg_padoe().read().bits(),
+                    registers.irq().read().bits(),
+                    registers.flevel().read().bits(),
+                    registers.fdebug().read().bits(),
                 )
                 .unwrap();
+                for (index, pc) in pcs.iter().enumerate() {
+                    match request.sms[index].map(|_| read_sm(registers, index)) {
+                        None => line.push_str(",,,,,,,,,,").unwrap(),
+                        Some(None) => {
+                            send(&mut usb, &mut serial, b"ERR register extraction failed\r\n");
+                            break 'ticks;
+                        }
+                        Some(Some((rx_count, rx, [isr, x, y, osr]))) => write!(
+                            line,
+                            ",{},{},{:08x},{:08x},{:08x},{:08x},{:08x},{:08x},{:08x},{:08x}",
+                            pc, rx_count, rx[0], rx[1], rx[2], rx[3], x, y, isr, osr
+                        )
+                        .unwrap(),
+                    }
+                }
+                line.push_str("\r\n").unwrap();
                 send(&mut usb, &mut serial, line.as_bytes());
                 if ticks_elapsed == request.ticks {
                     send(&mut usb, &mut serial, b"DONE\r\n");
@@ -231,72 +170,42 @@ fn reset_and_initialize(resets: &pac::RESETS, registers: &pac::pio0::RegisterBlo
         *seed ^= *seed << 5;
         *seed
     };
-    for sm in 1..4 {
-        registers.sm(sm).sm_shiftctrl().write(|w| unsafe { w.bits(1 << 14) });
-        for instruction in [0xe020 | junk() & 31, 0xe040 | junk() & 31, 0xa0c9, 0xa0f2] {
-            registers.sm(sm).sm_instr().write(|w| unsafe { w.bits(instruction) });
+    for (index, sm) in request.sms.iter().enumerate() {
+        registers.sm(index).sm_shiftctrl().write(|w| unsafe { w.bits(1 << 14) });
+        let rx = sm.map_or([junk(), junk(), junk(), junk()], |sm| sm.rx);
+        for (entry, word) in rx.iter().enumerate() {
+            unsafe { putget_entry(registers, index, entry).write_volatile(*word) };
         }
+        if sm.is_none() {
+            for instruction in [0xe020 | junk() & 31, 0xe040 | junk() & 31, 0xa0c9, 0xa0f2] {
+                registers.sm(index).sm_instr().write(|w| unsafe { w.bits(instruction) });
+            }
+        }
+        let config = sm.map_or([junk(), junk(), junk(), junk()], |sm| [sm.clkdiv, sm.execctrl, sm.shiftctrl, sm.pinctrl]);
+        registers.sm(index).sm_clkdiv().write(|w| unsafe { w.bits(config[0]) });
+        registers.sm(index).sm_execctrl().write(|w| unsafe { w.bits(config[1]) });
+        registers.sm(index).sm_shiftctrl().write(|w| unsafe { w.bits(config[2]) });
+        registers.sm(index).sm_pinctrl().write(|w| unsafe { w.bits(config[3]) });
     }
-    for index in 0..4 {
-        let words = [junk(), junk(), junk()];
-        registers.rxf1_putget(index).write(|w| unsafe { w.bits(words[0]) });
-        registers.rxf2_putget(index).write(|w| unsafe { w.bits(words[1]) });
-        registers.rxf3_putget(index).write(|w| unsafe { w.bits(words[2]) });
-    }
-    for sm in 2..4 {
-        let words = [junk(), junk(), junk(), junk()];
-        registers.sm(sm).sm_clkdiv().write(|w| unsafe { w.bits(words[0]) });
-        registers.sm(sm).sm_execctrl().write(|w| unsafe { w.bits(words[1]) });
-        registers.sm(sm).sm_shiftctrl().write(|w| unsafe { w.bits(words[2]) });
-        registers.sm(sm).sm_pinctrl().write(|w| unsafe { w.bits(words[3]) });
-    }
-
-    let mut code = [0u16; MARKER_ORIGIN];
-    code[request.origin as usize..][..request.len].copy_from_slice(&request.code[..request.len]);
-    for (slot, instruction) in code.iter().chain(&[0xa042; 2]).enumerate() {
+    for (slot, instruction) in request.code.iter().enumerate() {
         registers.instr_mem(slot).write(|w| unsafe { w.bits(*instruction as u32) });
     }
 
-    registers.sm(0).sm_shiftctrl().write(|w| unsafe { w.bits(1 << 14) });
-    for index in 0..4 {
-        registers.rxf0_putget(index).write(|w| unsafe { w.bits(request.rx[index]) });
+    registers.ctrl().write(|w| unsafe { w.bits((request.mask() as u32) << 4) });
+    for (index, sm) in request.sms.iter().enumerate() {
+        if let Some(sm) = sm {
+            load_state(registers, index, sm);
+            inject(registers, index, sm.pc as u16);
+            for word in &sm.tx[..sm.tx_len] {
+                registers.txf(index).write(|w| unsafe { w.bits(*word) });
+            }
+        }
     }
-
-    let configs = [
-        SmConfig {
-            clkdiv: (CLOCK_DIVIDER as u32) << 16,
-            execctrl: request.execctrl,
-            shiftctrl: request.shiftctrl,
-            pinctrl: request.pinctrl,
-        },
-        SmConfig { clkdiv: (CLOCK_DIVIDER as u32) << 16, execctrl: (30 << 7) | (31 << 12), shiftctrl: (1 << 18) | (1 << 19), pinctrl: 0 },
-    ];
-    for (index, config) in configs.iter().enumerate() {
-        let sm = registers.sm(index);
-        sm.sm_clkdiv().write(|w| unsafe { w.bits(config.clkdiv) });
-        sm.sm_execctrl().write(|w| unsafe { w.bits(config.execctrl) });
-        sm.sm_shiftctrl().write(|w| unsafe { w.bits(config.shiftctrl) });
-        sm.sm_pinctrl().write(|w| unsafe { w.bits(config.pinctrl) });
-    }
-
-    // Clear pending instructions, stalls, delays and shift counters in both SMs.
-    registers.ctrl().write(|w| unsafe { w.bits(0b11 << 4) });
-    load_state(registers, request);
-    inject(registers, jmp(request.origin));
-    registers
-        .sm(1)
-        .sm_instr()
-        .write(|w| unsafe { w.bits(jmp(MARKER_ORIGIN as u8) as u32) });
-    for word in &request.tx[..request.tx_len] {
-        registers.txf(0).write(|w| unsafe { w.bits(*word) });
-    }
-
-    // Restart both divided clocks in one write so future grouped starts are aligned.
-    registers.ctrl().write(|w| unsafe { w.bits(0b11 << 8) });
+    registers.irq_force().write(|w| unsafe { w.bits(request.irq as u32) });
 }
 
-fn load_state(registers: &pac::pio0::RegisterBlock, request: &Request) {
-    let sm = registers.sm(0);
+fn load_state(registers: &pac::pio0::RegisterBlock, index: usize, request: &Sm) {
+    let sm = registers.sm(index);
     sm.sm_clkdiv().write(|w| unsafe { w.bits(1 << 16) });
     sm.sm_shiftctrl().write(|w| unsafe { w.bits(request.shiftctrl & !(0b1111 << 14 | 0b11 << 30)) });
 
@@ -306,80 +215,104 @@ fn load_state(registers: &pac::pio0::RegisterBlock, request: &Request) {
         (count, false) => (request.isr >> count, request.isr & ((1 << count) - 1)),
         (count, true) => (request.isr << count, request.isr >> (32 - count)),
     };
-    load_osr(registers, isr);
-    execute(registers, 0xa0c7); // MOV ISR, OSR
+    load_osr(registers, index, isr);
+    execute(registers, index, 0xa0c7); // MOV ISR, OSR
     if request.isr_count > 0 {
-        load_osr(registers, isr_in);
-        execute(registers, 0x40e0 | (request.isr_count as u16 & 31)); // IN OSR, count
+        load_osr(registers, index, isr_in);
+        execute(registers, index, 0x40e0 | (request.isr_count as u16 & 31)); // IN OSR, count
     }
-    load_osr(registers, request.x);
-    execute(registers, 0xa027); // MOV X, OSR
-    load_osr(registers, request.y);
-    execute(registers, 0xa047); // MOV Y, OSR
+    load_osr(registers, index, request.x);
+    execute(registers, index, 0xa027); // MOV X, OSR
+    load_osr(registers, index, request.y);
+    execute(registers, index, 0xa047); // MOV Y, OSR
     let osr = match (request.osr_count, request.out_shift_right()) {
         (0 | 32, _) => request.osr,
         (count, true) => request.osr << count,
         (count, false) => request.osr >> count,
     };
-    load_osr(registers, osr);
+    load_osr(registers, index, osr);
     if request.osr_count > 0 {
-        execute(registers, 0x6060 | (request.osr_count as u16 & 31)); // OUT NULL, count
+        execute(registers, index, 0x6060 | (request.osr_count as u16 & 31)); // OUT NULL, count
     }
 
-    registers.irq_force().write(|w| unsafe { w.bits(request.irq as u32) });
     sm.sm_shiftctrl().write(|w| unsafe { w.bits(request.shiftctrl) });
-    sm.sm_clkdiv().write(|w| unsafe { w.bits((CLOCK_DIVIDER as u32) << 16) });
+    sm.sm_clkdiv().write(|w| unsafe { w.bits(request.clkdiv) });
 }
 
-fn load_osr(registers: &pac::pio0::RegisterBlock, word: u32) {
-    registers.txf(0).write(|w| unsafe { w.bits(word) });
-    execute(registers, 0x80a0); // PULL BLOCK
+fn load_osr(registers: &pac::pio0::RegisterBlock, index: usize, word: u32) {
+    registers.txf(index).write(|w| unsafe { w.bits(word) });
+    execute(registers, index, 0x80a0); // PULL BLOCK
 }
 
-fn execute(registers: &pac::pio0::RegisterBlock, instruction: u16) {
-    inject(registers, instruction);
-    while registers.sm(0).sm_execctrl().read().exec_stalled().bit_is_set() {
+fn execute(registers: &pac::pio0::RegisterBlock, index: usize, instruction: u16) {
+    inject(registers, index, instruction);
+    while registers.sm(index).sm_execctrl().read().exec_stalled().bit_is_set() {
         spin_loop();
     }
 }
 
-fn extract_hidden_registers(registers: &pac::pio0::RegisterBlock) -> Option<[u32; 4]> {
-    registers
-        .sm(0)
-        .sm_shiftctrl()
-        .modify(|r, w| unsafe { w.bits(r.bits() & !(0b1111 << 14 | 0b11 << 30)) });
+fn read_sm(registers: &pac::pio0::RegisterBlock, index: usize) -> Option<(usize, [u32; 4], [u32; 4])> {
+    let sm = registers.sm(index);
+    let putget = sm.sm_shiftctrl().read().bits() >> 14 & 3;
+    let mut rx = [0u32; 4];
+    let mut rx_count = 0usize;
+    if putget != 0 {
+        sm.sm_shiftctrl().modify(|r, w| unsafe { w.bits(r.bits() & !(1 << 14) | 1 << 15) });
+        for (entry, word) in rx.iter_mut().enumerate() {
+            *word = unsafe { putget_entry(registers, index, entry).read_volatile() };
+        }
+    }
+    while putget == 0 && registers.fstat().read().rxempty().bits() >> index & 1 == 0 {
+        let word = registers.rxf(index).read().bits();
+        if rx_count < rx.len() {
+            rx[rx_count] = word;
+        }
+        rx_count += 1;
+    }
 
+    sm.sm_shiftctrl().modify(|r, w| unsafe { w.bits(r.bits() & !(0b1111 << 14 | 0b11 << 30)) });
     // Diagnostic instructions must not apply mandatory side-set to pins.
-    registers.sm(0).sm_pinctrl().modify(|_, w| unsafe { w.sideset_count().bits(0) });
-    let isr = push_and_read(registers)?;
-    inject(registers, 0xa0c1); // MOV ISR, X
-    let x = push_and_read(registers)?;
-    inject(registers, 0xa0c2); // MOV ISR, Y
-    let y = push_and_read(registers)?;
-    inject(registers, 0xa0c7); // MOV ISR, OSR
-    let osr = push_and_read(registers)?;
+    sm.sm_pinctrl().modify(|_, w| unsafe { w.sideset_count().bits(0) });
+    let isr = push_and_read(registers, index)?;
+    inject(registers, index, 0xa0c1); // MOV ISR, X
+    let x = push_and_read(registers, index)?;
+    inject(registers, index, 0xa0c2); // MOV ISR, Y
+    let y = push_and_read(registers, index)?;
+    inject(registers, index, 0xa0c7); // MOV ISR, OSR
+    let osr = push_and_read(registers, index)?;
 
-    Some([isr, x, y, osr])
+    Some((rx_count, rx, [isr, x, y, osr]))
 }
 
-fn push_and_read(registers: &pac::pio0::RegisterBlock) -> Option<u32> {
-    inject(registers, 0x8000); // PUSH NOBLOCK
+fn push_and_read(registers: &pac::pio0::RegisterBlock, index: usize) -> Option<u32> {
+    inject(registers, index, 0x8000); // PUSH NOBLOCK
 
     for _ in 0..4096 {
-        if registers.fstat().read().rxempty().bits() & 1 == 0 {
-            return Some(registers.rxf(0).read().bits());
+        if registers.fstat().read().rxempty().bits() >> index & 1 == 0 {
+            return Some(registers.rxf(index).read().bits());
         }
         spin_loop();
     }
     None
 }
 
-fn inject(registers: &pac::pio0::RegisterBlock, instruction: u16) {
-    registers.sm(0).sm_instr().write(|w| unsafe { w.bits(instruction as u32) });
+fn inject(registers: &pac::pio0::RegisterBlock, index: usize, instruction: u16) {
+    registers.sm(index).sm_instr().write(|w| unsafe { w.bits(instruction as u32) });
 }
 
-fn jmp(address: u8) -> u16 {
-    address as u16
+fn putget_entry(registers: &pac::pio0::RegisterBlock, index: usize, entry: usize) -> *mut u32 {
+    registers.rxf0_putget(0).as_ptr().wrapping_add(4 * index + entry)
+}
+
+fn run(ctrl: *mut u32, enable: u32, cycles: u32) {
+    let code = unsafe { &mut *core::ptr::addr_of_mut!(RUN) };
+    code[0] = STR_R1_R0;
+    code[1..cycles as usize].fill(NOP_W);
+    code[cycles as usize..][..2].copy_from_slice(&[STR_R2_R0, BX_LR]);
+    cortex_m::asm::dsb();
+    cortex_m::asm::isb();
+    let run: extern "C" fn(*mut u32, u32, u32) = unsafe { core::mem::transmute(code.as_ptr() as usize | 1) };
+    run(ctrl, enable, 0);
 }
 
 fn send(usb: &mut UsbDevice<'_, hal::usb::UsbBus>, serial: &mut SerialPort<'_, hal::usb::UsbBus>, mut bytes: &[u8]) {

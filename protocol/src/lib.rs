@@ -1,21 +1,17 @@
 #![no_std]
 
-pub const MAX_WORDS: usize = 30;
 pub const MAX_TICKS: u32 = 1000;
-pub const MAX_REQUEST: usize = 512;
+pub const MAX_REQUEST: usize = 1024;
 pub const MAX_TX: usize = 4;
-pub const CSV_HEADER: &str = "ticks_elapsed,test_pc,marker_pc,padout,padoe,irq,flevel,fdebug,rx_count,rx0,rx1,rx2,rx3,x,y,isr,osr";
+pub const CSV_HEADER: &str = "ticks_elapsed,padout,padoe,irq,flevel,fdebug,sm0_pc,sm0_rx_count,sm0_rx0,sm0_rx1,sm0_rx2,sm0_rx3,sm0_x,sm0_y,sm0_isr,sm0_osr,sm1_pc,sm1_rx_count,sm1_rx0,sm1_rx1,sm1_rx2,sm1_rx3,sm1_x,sm1_y,sm1_isr,sm1_osr,sm2_pc,sm2_rx_count,sm2_rx0,sm2_rx1,sm2_rx2,sm2_rx3,sm2_x,sm2_y,sm2_isr,sm2_osr,sm3_pc,sm3_rx_count,sm3_rx0,sm3_rx1,sm3_rx2,sm3_rx3,sm3_x,sm3_y,sm3_isr,sm3_osr";
 
-/// Wire addresses (including encoded JMPs) are absolute.
-#[derive(Debug, PartialEq, Eq)]
-pub struct Request {
-    pub ticks: u32,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Sm {
+    pub clkdiv: u32,
     pub execctrl: u32,
     pub shiftctrl: u32,
     pub pinctrl: u32,
-    pub origin: u8,
-    pub len: usize,
-    pub code: [u16; MAX_WORDS],
+    pub pc: u8,
     pub tx_len: usize,
     pub tx: [u32; MAX_TX],
     pub x: u32,
@@ -24,20 +20,19 @@ pub struct Request {
     pub isr_count: u8,
     pub osr: u32,
     pub osr_count: u8,
-    pub irq: u8,
-    pub gpio_in: u32,
     pub rx: [u32; 4],
 }
 
-impl Request {
-    pub fn wrap_bottom(&self) -> u8 {
-        (self.execctrl >> 7) as u8 & 31
-    }
+#[derive(Debug, PartialEq, Eq)]
+pub struct Request {
+    pub ticks: u32,
+    pub code: [u16; 32],
+    pub irq: u8,
+    pub gpio_in: u32,
+    pub sms: [Option<Sm>; 4],
+}
 
-    pub fn wrap_top(&self) -> u8 {
-        (self.execctrl >> 12) as u8 & 31
-    }
-
+impl Sm {
     pub fn side_bits(&self) -> u8 {
         (self.pinctrl >> 29) as u8
     }
@@ -54,23 +49,12 @@ impl Request {
         self.shiftctrl >> 19 & 1 == 1
     }
 
-    pub fn validate(&self) -> Result<(), &'static str> {
-        if self.ticks == 0 || self.ticks > MAX_TICKS {
-            return Err("ticks must be 1..1000");
+    fn validate(&self) -> Result<(), &'static str> {
+        if self.clkdiv & 0xff != 0 {
+            return Err("CLKDIV bits 7:0 are reserved");
         }
-        if self.len == 0 || self.len > MAX_WORDS || self.origin as usize + self.len > MAX_WORDS {
-            return Err("program must fit in instruction slots 0..29");
-        }
-        let program = self.origin..self.origin + self.len as u8;
-        if !program.contains(&self.wrap_bottom()) || !program.contains(&self.wrap_top()) {
-            return Err("wrap outside program");
-        }
-        if self.side_optional() && self.side_bits() == 0 {
-            return Err("invalid side-set");
-        }
-        // JMPs may target unused slots, but never the clock marker.
-        if self.code[..self.len].iter().any(|w| w >> 13 == 0 && w & 31 >= 30) {
-            return Err("JMP targets reserved marker slots");
+        if self.pc > 31 {
+            return Err("PC must be 0..31");
         }
         if self.tx_len > MAX_TX {
             return Err("at most 4 TX words");
@@ -83,89 +67,103 @@ impl Request {
         }
         Ok(())
     }
+}
+
+impl Request {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.ticks == 0 || self.ticks > MAX_TICKS {
+            return Err("ticks must be 1..1000");
+        }
+        if self.mask() == 0 {
+            return Err("at least one state machine");
+        }
+        self.sms.iter().flatten().try_for_each(Sm::validate)
+    }
 
     pub fn parse(line: &str) -> Result<Self, &'static str> {
         let mut fields = line.split_ascii_whitespace();
-        if fields.next() != Some("RUN2") {
-            return Err("expected RUN2");
+        if fields.next() != Some("RUN3") {
+            return Err("expected RUN3");
         }
         let mut number = |radix| u32::from_str_radix(fields.next().ok_or("missing field")?, radix).map_err(|_| "invalid number");
         let ticks = number(10)?;
-        let (execctrl, shiftctrl, pinctrl) = (number(16)?, number(16)?, number(16)?);
-        let origin = u8::try_from(number(10)?).map_err(|_| "field out of range")?;
-        let len = number(10)? as usize;
-        if len > MAX_WORDS {
-            return Err("invalid length");
-        }
-        let mut code = [0; MAX_WORDS];
-        for word in &mut code[..len] {
-            *word = u16::try_from(number(16)?).map_err(|_| "invalid instruction")?;
-        }
-        let tx_len = number(10)? as usize;
-        if tx_len > MAX_TX {
-            return Err("invalid TX length");
-        }
-        let mut tx = [0; MAX_TX];
-        for word in &mut tx[..tx_len] {
-            *word = number(16)?;
-        }
-        let (x, y, isr) = (number(16)?, number(16)?, number(16)?);
-        let isr_count = u8::try_from(number(10)?).map_err(|_| "field out of range")?;
-        let osr = number(16)?;
-        let osr_count = u8::try_from(number(10)?).map_err(|_| "field out of range")?;
+        let mask = number(16)?;
         let irq = u8::try_from(number(16)?).map_err(|_| "field out of range")?;
         let gpio_in = number(16)?;
-        let mut rx = [0; 4];
-        for word in &mut rx {
-            *word = number(16)?;
+        let mut code = [0; 32];
+        for word in &mut code {
+            *word = u16::try_from(number(16)?).map_err(|_| "invalid instruction")?;
         }
-        if fields.next().is_some() {
+        let mut sms = [None; 4];
+        for sm in sms
+            .iter_mut()
+            .enumerate()
+            .filter_map(|(index, sm)| (mask >> index & 1 == 1).then_some(sm))
+        {
+            let (clkdiv, execctrl, shiftctrl, pinctrl) = (number(16)?, number(16)?, number(16)?, number(16)?);
+            let pc = u8::try_from(number(10)?).map_err(|_| "field out of range")?;
+            let tx_len = number(10)? as usize;
+            if tx_len > MAX_TX {
+                return Err("invalid TX length");
+            }
+            let mut tx = [0; MAX_TX];
+            for word in &mut tx[..tx_len] {
+                *word = number(16)?;
+            }
+            let (x, y, isr) = (number(16)?, number(16)?, number(16)?);
+            let isr_count = u8::try_from(number(10)?).map_err(|_| "field out of range")?;
+            let osr = number(16)?;
+            let osr_count = u8::try_from(number(10)?).map_err(|_| "field out of range")?;
+            let mut rx = [0; 4];
+            for word in &mut rx {
+                *word = number(16)?;
+            }
+            *sm = Some(Sm { clkdiv, execctrl, shiftctrl, pinctrl, pc, tx_len, tx, x, y, isr, isr_count, osr, osr_count, rx });
+        }
+        if mask > 15 || fields.next().is_some() {
             return Err("extra fields");
         }
-        let request = Self {
-            ticks,
-            execctrl,
-            shiftctrl,
-            pinctrl,
-            origin,
-            len,
-            code,
-            tx_len,
-            tx,
-            x,
-            y,
-            isr,
-            isr_count,
-            osr,
-            osr_count,
-            irq,
-            gpio_in,
-            rx,
-        };
+        let request = Self { ticks, code, irq, gpio_in, sms };
         request.validate()?;
         Ok(request)
+    }
+
+    pub fn mask(&self) -> u8 {
+        self.sms
+            .iter()
+            .enumerate()
+            .fold(0, |mask, (index, sm)| mask | (sm.is_some() as u8) << index)
     }
 
     pub fn write(&self, output: &mut impl core::fmt::Write) -> core::fmt::Result {
         write!(
             output,
-            "RUN2 {} {:08x} {:08x} {:08x} {} {}",
-            self.ticks, self.execctrl, self.shiftctrl, self.pinctrl, self.origin, self.len
+            "RUN3 {} {:x} {:02x} {:08x}",
+            self.ticks,
+            self.mask(),
+            self.irq,
+            self.gpio_in
         )?;
-        for word in &self.code[..self.len] {
+        for word in &self.code {
             write!(output, " {word:04x}")?;
         }
-        write!(output, " {}", self.tx_len)?;
-        for word in &self.tx[..self.tx_len] {
-            write!(output, " {word:08x}")?;
-        }
-        write!(
-            output,
-            " {:08x} {:08x} {:08x} {} {:08x} {} {:02x} {:08x}",
-            self.x, self.y, self.isr, self.isr_count, self.osr, self.osr_count, self.irq, self.gpio_in
-        )?;
-        for word in &self.rx {
-            write!(output, " {word:08x}")?;
+        for sm in self.sms.iter().flatten() {
+            write!(
+                output,
+                " {:08x} {:08x} {:08x} {:08x} {} {}",
+                sm.clkdiv, sm.execctrl, sm.shiftctrl, sm.pinctrl, sm.pc, sm.tx_len
+            )?;
+            for word in &sm.tx[..sm.tx_len] {
+                write!(output, " {word:08x}")?;
+            }
+            write!(
+                output,
+                " {:08x} {:08x} {:08x} {} {:08x} {}",
+                sm.x, sm.y, sm.isr, sm.isr_count, sm.osr, sm.osr_count
+            )?;
+            for word in &sm.rx {
+                write!(output, " {word:08x}")?;
+            }
         }
         writeln!(output)
     }
@@ -220,54 +218,54 @@ mod tests {
     extern crate std;
     use super::*;
     use std::string::String;
+    const LINE: &str = "RUN3 16 5 ff 89abcdef e023 0241 80a0 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 001f 00010000 00002000 000c0000 14000000 0 2 12345678 9abcdef0 00000001 00000002 00000003 4 00000005 6 0000000a 0000000b 0000000c 0000000d 00028000 40006200 000f0000 40000000 31 0 deadbeef 00000000 ffffffff 32 00000000 32 00000001 00000002 00000003 00000004\n";
     #[test]
     fn framing_and_recovery() {
-        let line =
-            b"RUN2 16 00002000 000c0000 14000000 0 3 e023 0241 80a0 2 12345678 9abcdef0 00000001 00000002 00000003 4 00000005 6 ff 89abcdef 0000000a 0000000b 0000000c 0000000d\r\n";
         let mut decoder = Decoder::default();
-        for _ in 0..300 {
+        for _ in 0..MAX_REQUEST + 1 {
             assert!(decoder.push(b'x').is_none());
         }
         assert!(decoder.push(b'\n').unwrap().is_err());
         for _ in 0..2 {
-            for byte in &line[..line.len() - 1] {
+            for byte in &LINE.as_bytes()[..LINE.len() - 1] {
                 assert!(decoder.push(*byte).is_none());
             }
+            assert!(decoder.push(b'\r').is_none());
             let request = decoder.push(b'\n').unwrap().unwrap();
-            assert_eq!(request.ticks, 16);
-            assert_eq!((request.wrap_bottom(), request.wrap_top()), (0, 2));
-            assert_eq!(&request.code[..3], &[0xe023, 0x0241, 0x80a0]);
-            assert_eq!(&request.tx[..request.tx_len], &[0x1234_5678, 0x9abc_def0]);
-            assert_eq!(
-                (request.isr, request.isr_count, request.osr_count, request.irq, request.gpio_in),
-                (3, 4, 6, 0xff, 0x89ab_cdef)
-            );
+            let sm = request.sms[0].unwrap();
+            assert_eq!((request.ticks, request.irq, request.gpio_in), (16, 0xff, 0x89ab_cdef));
+            assert_eq!((&request.code[..3], request.code[31]), (&[0xe023, 0x0241, 0x80a0][..], 0x001f));
+            assert_eq!(&sm.tx[..sm.tx_len], &[0x1234_5678, 0x9abc_def0]);
+            assert_eq!((sm.isr, sm.isr_count, sm.osr_count), (3, 4, 6));
+            assert_eq!((request.sms[1], request.sms[2].unwrap().pc, request.sms[3]), (None, 31, None));
         }
     }
     #[test]
     fn round_trip() {
-        let line = "RUN2 7 40006200 000f0000 40000000 4 3 f823 0245 80a0 1 deadbeef 00000000 ffffffff 80000000 32 00000000 32 00 00000000 00000001 00000002 00000003 00000004\n";
         let mut wire = String::new();
-        Request::parse(line).unwrap().write(&mut wire).unwrap();
-        assert_eq!(wire, line);
+        Request::parse(LINE).unwrap().write(&mut wire).unwrap();
+        assert_eq!(wire, LINE);
     }
     #[test]
     fn invalid_requests() {
-        for line in [
-            "RUN2 0 00000000 000c0000 14000000 0 1 e023 0 0 0 0 0 0 32 0 0 0 0 0 0",
-            "RUN2 1001 00000000 000c0000 14000000 0 1 e023 0 0 0 0 0 0 32 0 0 0 0 0 0",
-            "RUN2 1 0001e000 000c0000 14000000 0 1 e023 0 0 0 0 0 0 32 0 0 0 0 0 0",
-            "RUN2 1 40000000 000c0000 14000000 0 1 e023 0 0 0 0 0 0 32 0 0 0 0 0 0",
-            "RUN2 1 00000000 000c0000 14000000 0 1 001e 0 0 0 0 0 0 32 0 0 0 0 0 0",
-            "RUN2 1 00000000 000c0000 14000000 0 2 e023 0 0 0 0 0 0 32 0 0 0 0 0 0",
-            "RUN2 1 00000000 000c0000 14000000 0 1 e023 5 1 2 3 4 5 0 0 0 0 0 32 0 0 0 0 0 0",
-            "RUN2 1 00000000 000c0000 14000000 0 1 e023 0 0 0 0 0 0 32 0 0 0 0 0 0 extra",
-            "RUN2 1 00000000 000c0000 14000000 0 1 e023 0 0 0 0 33 0 32 0 0 0 0 0 0",
-            "RUN2 1 00000000 000c0000 14000000 0 1 e023 0 0 0 0 0 80000000 1 0 0 0 0 0 0",
-            "RUN2 1 00000000 00040000 14000000 0 1 e023 0 0 0 0 0 00000001 1 0 0 0 0 0 0",
-            "RUN1 1 0 0 0 0 0 1 e023",
+        let line = LINE.trim_end();
+        for (from, to) in [
+            ("RUN3 16", "RUN3 0"),
+            ("RUN3 16", "RUN3 1001"),
+            ("RUN3 16 5", "RUN3 16 15"),
+            ("RUN3 16 5", "RUN3 16 15 0"),
+            ("RUN3 16 5", "RUN3 16 25"),
+            ("00010000 00002000", "00010001 00002000"),
+            ("40006200 000f0000 40000000 31", "40006200 000f0000 40000000 32"),
+            ("0 2 12345678", "0 5 12345678"),
+            ("00000003 4", "00000003 33"),
+            ("00000005 6", "00000005 31"),
+            ("00000004", "00000004 extra"),
+            ("RUN3", "RUN2"),
         ] {
-            assert!(Request::parse(line).is_err(), "{line}");
+            let invalid = line.replacen(from, to, 1);
+            assert!(Request::parse(&invalid).is_err(), "{invalid}");
         }
+        assert!(Request { sms: [None; 4], ..Request::parse(LINE).unwrap() }.validate().is_err());
     }
 }
