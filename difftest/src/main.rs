@@ -5,7 +5,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use arbitrary_int::u5;
 use pioemu::instr::Instr;
 use pioemu::state::{Block, Config};
-use pioemu_protocol::{CSV_HEADER, MAX_TX, MAX_WORDS, Request, osr_reachable};
+use pioemu_protocol::{CSV_HEADER, MAX_TX, Request, Sm, osr_reachable};
 use serialport::{SerialPort, SerialPortType};
 
 mod cases;
@@ -13,8 +13,6 @@ mod cases;
 const RANDOM_TICKS: u32 = 32;
 const RANDOM_MAX_LEN: u64 = 8;
 const RECORD_RUNS: u64 = 50;
-const MARKER_NOP: u16 = 0xa042;
-const MARKER_EXECCTRL: u32 = (MAX_WORDS as u32) << 7 | (MAX_WORDS as u32 + 1) << 12;
 
 fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -38,10 +36,18 @@ fn main() -> Result<(), Box<dyn Error>> {
                 let trace = hardware.run(&request)?;
                 for seed in 1..RECORD_RUNS {
                     let (mut code, mut rng) = (request.code, Rng(seed));
-                    for word in &mut code[request.len..] {
-                        *word = random_word(&mut rng, 0, MAX_WORDS);
+                    let len = request
+                        .sms
+                        .iter()
+                        .flatten()
+                        .map(|sm| sm.execctrl as usize >> 12 & 31)
+                        .max()
+                        .unwrap_or(0)
+                        + 1;
+                    for word in &mut code[len..] {
+                        *word = random_word(&mut rng, 0, 32);
                     }
-                    if hardware.run(&Request { len: MAX_WORDS, code, ..request })? != trace {
+                    if hardware.run(&Request { code, ..request })? != trace {
                         nondeterministic.push(name);
                         break;
                     }
@@ -185,34 +191,28 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> &str {
 }
 
 fn emulate(request: &Request, strict: bool) -> Vec<String> {
-    let mut words = [0u16; 32];
-    words[request.origin as usize..][..request.len].copy_from_slice(&request.code[..request.len]);
-    words[MAX_WORDS..].fill(MARKER_NOP);
     let mut block = Block::new(strict);
-    let config = Config::from_registers(request.execctrl, request.shiftctrl, request.pinctrl);
-    for (instr, word) in block.instr_mem.iter_mut().zip(words) {
-        *instr = Some(Instr::decode(word, &config, strict));
-    }
-
-    block.configure(0, request.execctrl, request.shiftctrl, request.pinctrl);
-    block.configure(1, MARKER_EXECCTRL, 0x000c_0000, 0);
-    let [test, marker, ..] = &mut block.sms;
-    test.state.pc = u5::new(request.origin);
-    for word in &request.tx[..request.tx_len] {
-        test.write_tx(*word);
-    }
-    test.state.x = request.x;
-    test.state.y = request.y;
-    test.state.isr = request.isr;
-    test.state.isr_shift_count = request.isr_count;
-    test.state.osr = request.osr;
-    test.state.osr_shift_count = request.osr_count;
-    test.state.rx_putget = request.rx;
-    block.irq_flags = request.irq;
+    block.instr_mem = request.code;
+    block.irq_flags = request.irq as u32;
     block.gpio_in = request.gpio_in;
-    marker.state.pc = u5::new(MAX_WORDS as u8);
-    test.enabled = true;
-    marker.enabled = true;
+    for (i, request) in request.sms.into_iter().enumerate() {
+        if let Some(request) = request {
+            block.configure(i, request.clkdiv, request.execctrl, request.shiftctrl, request.pinctrl);
+            let sm = &mut block.sms[i];
+            sm.state.pc = u5::new(request.pc);
+            for word in &request.tx[..request.tx_len] {
+                sm.write_tx(*word);
+            }
+            sm.state.x = request.x;
+            sm.state.y = request.y;
+            sm.state.isr = request.isr;
+            sm.state.isr_shift_count = request.isr_count;
+            sm.state.osr = request.osr;
+            sm.state.osr_shift_count = request.osr_count;
+            sm.state.rx_putget = request.rx;
+            sm.enabled = true;
+        }
+    }
 
     (1..=request.ticks)
         .map(|tick| {
@@ -226,31 +226,38 @@ fn emulate(request: &Request, strict: bool) -> Vec<String> {
                     | (sm.state.tx_over as u32) << (16 + i)
                     | (sm.state.tx_stalled as u32) << (24 + i)
             });
-            let (test, marker) = (&block.sms[0].state, &block.sms[1].state);
-            let mut rx = if request.shiftctrl >> 14 & 3 == 0 { [0; 4] } else { test.rx_putget };
-            for (destination, word) in rx.iter_mut().zip(test.rx_fifo.iter()) {
-                *destination = *word;
+            let [padout, padoe] = block.pads();
+            let mut row = format!(
+                "{tick},{padout:08x},{padoe:08x},{:02x},{flevel:08x},{fdebug:08x}",
+                block.irq_flags & 0xff
+            );
+            for (sm, request) in block.sms.iter().zip(&request.sms) {
+                row += &request.map_or(",,,,,,,,,,".into(), |request| {
+                    let state = &sm.state;
+                    let mut rx = if request.shiftctrl >> 14 & 3 == 0 {
+                        [0; 4]
+                    } else {
+                        state.rx_putget
+                    };
+                    for (destination, word) in rx.iter_mut().zip(state.rx_fifo.iter()) {
+                        *destination = *word;
+                    }
+                    format!(
+                        ",{},{},{:08x},{:08x},{:08x},{:08x},{:08x},{:08x},{:08x},{:08x}",
+                        state.pc.value(),
+                        state.rx_fifo.len(),
+                        rx[0],
+                        rx[1],
+                        rx[2],
+                        rx[3],
+                        state.x,
+                        state.y,
+                        state.isr,
+                        state.osr,
+                    )
+                });
             }
-            format!(
-                "{},{},{},{:08x},{:08x},{:02x},{:08x},{:08x},{},{:08x},{:08x},{:08x},{:08x},{:08x},{:08x},{:08x},{:08x}",
-                tick,
-                test.pc.value(),
-                marker.pc.value(),
-                block.gpio_out,
-                block.gpio_dir,
-                block.irq_flags,
-                flevel,
-                fdebug,
-                test.rx_fifo.len(),
-                rx[0],
-                rx[1],
-                rx[2],
-                rx[3],
-                test.x,
-                test.y,
-                test.isr,
-                test.osr,
-            )
+            row
         })
         .collect()
 }
@@ -288,6 +295,7 @@ fn random_word(rng: &mut Rng, origin: u8, len: usize) -> u16 {
         0 => (0, rng.below(8), origin as u16 + rng.below(len as u64)),
         1 => match rng.below(4) {
             3 => (1, rng.below(2) << 2 | 3, rng.below(4)),
+            2 => (1, rng.below(2) << 2 | 2, irq_index(rng)),
             source => (1, rng.below(2) << 2 | source, rng.below(32)),
         },
         2 => (2, rng.below(8), rng.below(32)),
@@ -297,11 +305,18 @@ fn random_word(rng: &mut Rng, origin: u8, len: usize) -> u16 {
             _ => (4, rng.below(8), rng.below(16)),
         },
         5 => (5, rng.below(8), rng.below(32)),
-        6 => (6, rng.below(8), rng.below(32)),
+        6 => (6, rng.below(8), irq_index(rng)),
         _ => (7, rng.below(8), rng.below(32)),
     };
     let delay = if rng.below(2) == 0 { rng.below(32) } else { 0 };
     opcode << 13 | delay << 8 | a << 5 | b
+}
+
+fn irq_index(rng: &mut Rng) -> u16 {
+    match rng.below(2) {
+        0 => rng.below(32),
+        _ => rng.below(2) << 4 | rng.below(4),
+    }
 }
 
 fn random_value(rng: &mut Rng, origin: u8, len: usize) -> u32 {
@@ -315,26 +330,40 @@ fn random_value(rng: &mut Rng, origin: u8, len: usize) -> u32 {
 }
 
 fn random_request(rng: &mut Rng) -> Request {
+    let (mask, pins, mut code) = (1 + rng.below(15), [4, 32][rng.below(2) as usize], [0; 32]);
+    let sms: [Option<Sm>; 4] = std::array::from_fn(|index| (mask >> index & 1 == 1).then(|| random_sm(rng, pins, &mut code)));
+    let tx_joined = sms.iter().flatten().any(|sm| sm.shiftctrl & (1 << 30 | 3 << 14) == 1 << 30);
+    for word in code.iter_mut().filter(|_| tx_joined) {
+        let exec = matches!((*word >> 13, *word >> 5 & 7), (3, 7) | (5, 4));
+        if exec || *word >> 13 == 4 && *word & 0x90 == 0x90 {
+            *word ^= if exec { 0x80 } else { 0x10 };
+        }
+    }
+    Request { ticks: RANDOM_TICKS, code, irq: rng.below(256) as u8, gpio_in: rng.next() as u32, sms }
+}
+
+fn random_sm(rng: &mut Rng, pins: u64, code: &mut [u16; 32]) -> Sm {
     let len = 1 + rng.below(RANDOM_MAX_LEN) as usize;
-    let origin = rng.below((MAX_WORDS - len + 1) as u64) as u8;
+    let origin = rng.below((32 - len + 1) as u64) as u8;
     let wrap_top = origin as u32 + rng.below(len as u64) as u32;
     let wrap_bottom = origin as u32 + rng.below(wrap_top as u64 - origin as u64 + 1) as u32;
     let mut field = |values: u64, lsb: u32| (rng.below(values) as u32) << lsb;
+    let clkdiv = match field(3, 0) {
+        0 => 1 << 16,
+        _ => (1 + field(3, 0)) << 16 | field(2, 0) * field(256, 8),
+    };
     let side_count = if field(16, 0) == 0 { 6 | field(2, 0) } else { field(6, 0) };
-    let side_en = if side_count > 0 { field(2, 30) } else { 0 };
-    let execctrl = field(32, 0) | field(4, 5) | field(128, 17) | field(32, 24) | wrap_bottom << 7 | wrap_top << 12 | field(2, 29) | side_en;
+    let execctrl = field(32, 0) | field(4, 5) | field(128, 17) | field(32, 24) | wrap_bottom << 7 | wrap_top << 12 | field(4, 29);
     let putget = if field(2, 0) == 0 { field(4, 14) } else { 0 };
     let shiftctrl = field(32, 0) | putget | field(16, 16) | field(32, 20) | field(32, 25) | field(4, 30);
     let set_count = if field(16, 0) == 0 { 6 | field(2, 0) } else { field(6, 0) };
-    let pinctrl = field(32, 0) | field(32, 5) | field(32, 10) | field(32, 15) | field(64, 20) | set_count << 26 | side_count << 29;
-    let mut request = Request {
-        ticks: RANDOM_TICKS,
+    let pinctrl = field(pins, 0) | field(pins, 5) | field(pins, 10) | field(32, 15) | field(64, 20) | set_count << 26 | side_count << 29;
+    let mut sm = Sm {
+        clkdiv,
         execctrl,
         shiftctrl,
         pinctrl,
-        origin,
-        len,
-        code: [0; MAX_WORDS],
+        pc: origin,
         tx_len: rng.below(MAX_TX as u64 + 1) as usize,
         tx: [0; MAX_TX],
         x: random_value(rng, origin, len),
@@ -343,160 +372,164 @@ fn random_request(rng: &mut Rng) -> Request {
         isr_count: rng.below(33) as u8,
         osr: random_value(rng, origin, len),
         osr_count: rng.below(33) as u8,
-        irq: rng.below(256) as u8,
-        gpio_in: rng.next() as u32,
         rx: std::array::from_fn(|_| rng.next() as u32),
     };
-    request.osr = osr_reachable(request.osr, request.osr_count, request.out_shift_right());
-    for word in &mut request.code[..len] {
+    sm.osr = osr_reachable(sm.osr, sm.osr_count, sm.out_shift_right());
+    for word in &mut code[origin as usize..][..len] {
         *word = random_word(rng, origin, len);
-        if *word >> 13 == 4 && *word & 0x90 == 0x90 && shiftctrl & (1 << 30 | 3 << 14) == 1 << 30 {
-            *word &= !0x10;
-        }
     }
-    for word in &mut request.tx[..request.tx_len] {
+    for word in &mut sm.tx[..sm.tx_len] {
         *word = random_value(rng, origin, len);
     }
-    request
+    sm
 }
 
-const SWEEP_STATES: [Request; 5] = [
-    Request {
-        ticks: 0,
-        execctrl: 0,
-        shiftctrl: 0,
-        pinctrl: 0,
-        origin: 0,
-        len: 1,
-        code: [0; MAX_WORDS],
-        tx_len: 0,
-        tx: [0; MAX_TX],
-        x: 0,
-        y: 0,
-        isr: 0,
-        isr_count: 0,
-        osr: 0,
-        osr_count: 0,
-        irq: 0,
-        gpio_in: 0,
-        rx: [0; 4],
-    },
-    Request {
-        ticks: 0,
-        execctrl: 5 << 24 | 9 << 12 | 9 << 7 | 2,
-        shiftctrl: 20 << 25 | 12 << 20 | 1 << 19 | 1 << 18,
-        pinctrl: 2 << 29 | 5 << 26 | 8 << 20 | 3 << 15 | 12 << 10 | 8 << 5 | 4,
-        origin: 9,
-        len: 1,
-        code: [0; MAX_WORDS],
-        tx_len: 4,
-        tx: [0x0123_4567, 0x89ab_cdef, 0xfedc_ba98, 0x7654_3210],
-        x: 0xffff_ffff,
-        y: 0x5555_5555,
-        isr: 0xa5a5_a5a5,
-        isr_count: 16,
-        osr: 0x0000_c3c3,
-        osr_count: 16,
-        irq: 0xff,
-        gpio_in: 0xaaaa_aaaa,
-        rx: [0; 4],
-    },
-    Request {
-        ticks: 0,
-        execctrl: 1 << 30 | 1 << 29 | 7 << 24 | 6 << 19 | 1 << 18 | 1 << 17 | 20 << 12 | 20 << 7 | 1 << 5 | 1,
-        shiftctrl: 24 << 25 | 8 << 20 | 1 << 17 | 1 << 16,
-        pinctrl: 3 << 29 | 3 << 26 | 4 << 20 | 16 << 15 | 31 << 10 | 30,
-        origin: 20,
-        len: 1,
-        code: [0; MAX_WORDS],
-        tx_len: 1,
-        tx: [0xdead_beef, 0, 0, 0],
-        x: 0x8000_0001,
-        y: 1,
-        isr: 0x1234_5678,
-        isr_count: 7,
-        osr: 0xdea0_0000,
-        osr_count: 20,
-        irq: 0x5a,
-        gpio_in: 0x0f0f_0f0f,
-        rx: [0; 4],
-    },
-    Request {
-        ticks: 0,
-        execctrl: 29 << 12 | 29 << 7 | 2 << 5 | 3,
-        shiftctrl: 1 << 18 | 1 << 15 | 1 << 14,
-        pinctrl: 5 << 29 | 5 << 26 | 32 << 20 | 2 << 10 | 26 << 5,
-        origin: 29,
-        len: 1,
-        code: [0; MAX_WORDS],
-        tx_len: 2,
-        tx: [0xffff_0000, 0x0000_ffff, 0, 0],
-        x: 1,
-        y: 0xffff_fffe,
-        isr: 0xcafe_f00d,
-        isr_count: 32,
-        osr: 0x1357_9bdf,
-        osr_count: 0,
-        irq: 0x0f,
-        gpio_in: 0xffff_ffff,
-        rx: [0x1111_1111, 0x2222_2222, 0x4444_4444, 0x8888_8888],
-    },
-    Request {
-        ticks: 0,
-        execctrl: 1 << 30 | 31 << 24 | 15 << 12 | 15 << 7 | 4,
-        shiftctrl: 1 << 30 | 1 << 19 | 1 << 18 | 1 << 17 | 1 << 16,
-        pinctrl: 1 << 29 | 1 << 26 | 1 << 20 | 1 << 15 | 1 << 10 | 1 << 5 | 1,
-        origin: 15,
-        len: 1,
-        code: [0; MAX_WORDS],
-        tx_len: 3,
-        tx: [0x8000_0000, 0xffff_ffff, 1, 0],
-        x: 0x7fff_ffff,
-        y: 0x8000_0000,
-        isr: 0x7fff_fffe,
-        isr_count: 31,
-        osr: 0,
-        osr_count: 32,
-        irq: 0x80,
-        gpio_in: 0x5555_5555,
-        rx: [0; 4],
-    },
+const SWEEP_STATES: [(u8, u32, Sm); 5] = [
+    (
+        0,
+        0,
+        Sm {
+            clkdiv: 1 << 16,
+            execctrl: 0,
+            shiftctrl: 0,
+            pinctrl: 0,
+            pc: 0,
+            tx_len: 0,
+            tx: [0; MAX_TX],
+            x: 0,
+            y: 0,
+            isr: 0,
+            isr_count: 0,
+            osr: 0,
+            osr_count: 0,
+            rx: [0; 4],
+        },
+    ),
+    (
+        0xff,
+        0xaaaa_aaaa,
+        Sm {
+            clkdiv: 1 << 16,
+            execctrl: 5 << 24 | 9 << 12 | 9 << 7 | 2,
+            shiftctrl: 20 << 25 | 12 << 20 | 1 << 19 | 1 << 18,
+            pinctrl: 2 << 29 | 5 << 26 | 8 << 20 | 3 << 15 | 12 << 10 | 8 << 5 | 4,
+            pc: 9,
+            tx_len: 4,
+            tx: [0x0123_4567, 0x89ab_cdef, 0xfedc_ba98, 0x7654_3210],
+            x: 0xffff_ffff,
+            y: 0x5555_5555,
+            isr: 0xa5a5_a5a5,
+            isr_count: 16,
+            osr: 0x0000_c3c3,
+            osr_count: 16,
+            rx: [0; 4],
+        },
+    ),
+    (
+        0x5a,
+        0x0f0f_0f0f,
+        Sm {
+            clkdiv: 1 << 16,
+            execctrl: 1 << 30 | 1 << 29 | 7 << 24 | 6 << 19 | 1 << 18 | 1 << 17 | 20 << 12 | 20 << 7 | 1 << 5 | 1,
+            shiftctrl: 24 << 25 | 8 << 20 | 1 << 17 | 1 << 16,
+            pinctrl: 3 << 29 | 3 << 26 | 4 << 20 | 16 << 15 | 31 << 10 | 30,
+            pc: 20,
+            tx_len: 1,
+            tx: [0xdead_beef, 0, 0, 0],
+            x: 0x8000_0001,
+            y: 1,
+            isr: 0x1234_5678,
+            isr_count: 7,
+            osr: 0xdea0_0000,
+            osr_count: 20,
+            rx: [0; 4],
+        },
+    ),
+    (
+        0x0f,
+        0xffff_ffff,
+        Sm {
+            clkdiv: 1 << 16,
+            execctrl: 29 << 12 | 29 << 7 | 2 << 5 | 3,
+            shiftctrl: 1 << 18 | 1 << 15 | 1 << 14,
+            pinctrl: 5 << 29 | 5 << 26 | 32 << 20 | 2 << 10 | 26 << 5,
+            pc: 29,
+            tx_len: 2,
+            tx: [0xffff_0000, 0x0000_ffff, 0, 0],
+            x: 1,
+            y: 0xffff_fffe,
+            isr: 0xcafe_f00d,
+            isr_count: 32,
+            osr: 0x1357_9bdf,
+            osr_count: 0,
+            rx: [0x1111_1111, 0x2222_2222, 0x4444_4444, 0x8888_8888],
+        },
+    ),
+    (
+        0x80,
+        0x5555_5555,
+        Sm {
+            clkdiv: 1 << 16,
+            execctrl: 1 << 30 | 31 << 24 | 15 << 12 | 15 << 7 | 4,
+            shiftctrl: 1 << 30 | 1 << 19 | 1 << 18 | 1 << 17 | 1 << 16,
+            pinctrl: 1 << 29 | 1 << 26 | 1 << 20 | 1 << 15 | 1 << 10 | 1 << 5 | 1,
+            pc: 15,
+            tx_len: 3,
+            tx: [0x8000_0000, 0xffff_ffff, 1, 0],
+            x: 0x7fff_ffff,
+            y: 0x8000_0000,
+            isr: 0x7fff_fffe,
+            isr_count: 31,
+            osr: 0,
+            osr_count: 32,
+            rx: [0; 4],
+        },
+    ),
 ];
 
 fn sweep(state: usize) -> Vec<(String, Request)> {
+    let (irq, gpio_in, sm) = SWEEP_STATES[state];
     (0..=u16::MAX)
-        .filter(|word| word >> 13 != 0 || word & 31 < 30)
         .map(|word| {
-            let mut code = [0; MAX_WORDS];
-            code[0] = word;
+            let mut code = [0; 32];
+            code[sm.pc as usize] = word;
             (
                 format!("word {word:04x}"),
-                Request { ticks: (word >> 8 & 31) as u32 + 2, code, ..SWEEP_STATES[state] },
+                Request { ticks: (word >> 8 & 31) as u32 + 2, code, irq, gpio_in, sms: [Some(sm), None, None, None] },
             )
         })
         .collect()
 }
 
 fn disassemble(request: &Request) -> String {
-    let mut text = format!(
-        "  execctrl {:08x}, shiftctrl {:08x}, pinctrl {:08x}, tx {:08x?}\n  x {:08x}, y {:08x}, isr {:08x} ({}), osr {:08x} ({}), irq {:02x}, gpio_in {:08x}, rx {:08x?}\n",
-        request.execctrl,
-        request.shiftctrl,
-        request.pinctrl,
-        &request.tx[..request.tx_len],
-        request.x,
-        request.y,
-        request.isr,
-        request.isr_count,
-        request.osr,
-        request.osr_count,
-        request.irq,
-        request.gpio_in,
-        request.rx
-    );
-    let config = Config::from_registers(request.execctrl, request.shiftctrl, request.pinctrl);
-    for (slot, word) in (request.origin as usize..).zip(&request.code[..request.len]) {
-        text += &format!("  {slot:2}: {word:04x}  {}\n", Instr::decode(*word, &config, false));
+    let mut text = format!("  irq {:02x}, gpio_in {:08x}\n", request.irq, request.gpio_in);
+    for (index, sm) in request.sms.iter().enumerate().filter_map(|(index, sm)| Some((index, sm.as_ref()?))) {
+        text += &format!(
+            "  sm{index}: clkdiv {:08x}, execctrl {:08x}, shiftctrl {:08x}, pinctrl {:08x}, pc {}, tx {:08x?}\n    x {:08x}, y {:08x}, isr {:08x} ({}), osr {:08x} ({}), rx {:08x?}\n",
+            sm.clkdiv,
+            sm.execctrl,
+            sm.shiftctrl,
+            sm.pinctrl,
+            sm.pc,
+            &sm.tx[..sm.tx_len],
+            sm.x,
+            sm.y,
+            sm.isr,
+            sm.isr_count,
+            sm.osr,
+            sm.osr_count,
+            sm.rx
+        );
+    }
+    let configs: Vec<Config> = request
+        .sms
+        .iter()
+        .flatten()
+        .map(|sm| Config::from_registers(sm.clkdiv, sm.execctrl, sm.shiftctrl, sm.pinctrl))
+        .collect();
+    for (slot, word) in request.code.iter().enumerate() {
+        let decoded = configs.iter().map(|config| Instr::decode(*word, config, false).to_string());
+        text += &format!("  {slot:2}: {word:04x}  {}\n", decoded.collect::<Vec<_>>().join(" | "));
     }
     text
 }
@@ -506,14 +539,12 @@ mod tests {
     use super::*;
     #[test]
     fn emulated_trace() {
-        let mut request = Request {
-            ticks: 16,
+        let sm = Sm {
+            clkdiv: 1 << 16,
             execctrl: 1 << 30 | 6 << 12 | 4 << 7,
             shiftctrl: 0x000c_0000,
             pinctrl: 2 << 29 | 5 << 26,
-            origin: 4,
-            len: 3,
-            code: [0; MAX_WORDS],
+            pc: 4,
             tx_len: 0,
             tx: [0; MAX_TX],
             x: 0,
@@ -522,21 +553,25 @@ mod tests {
             isr_count: 0,
             osr: 0,
             osr_count: 32,
-            irq: 0,
-            gpio_in: 0,
             rx: [0; 4],
         };
-        request.code[..3].copy_from_slice(&[0xf823, 0x0245, 0x80a0]);
+        let mut request =
+            Request { ticks: 16, code: [0; 32], irq: 0, gpio_in: 0, sms: [Some(sm), None, Some(Sm { clkdiv: 0x0002_8000, ..sm }), None] };
+        request.code[4..7].copy_from_slice(&[0xf823, 0x0245, 0x80a0]);
         let rows = emulate(&request, true);
         let field = |tick: usize, column: &str| {
             let index = CSV_HEADER.split(',').position(|c| c == column).unwrap();
             rows[tick - 1].split(',').nth(index).unwrap().to_owned()
         };
-        assert_eq!((field(1, "test_pc"), field(1, "x")), ("5".into(), "00000003".into()));
-        assert_eq!((field(1, "marker_pc"), field(2, "marker_pc")), ("31".into(), "30".into()));
-        assert_eq!((field(10, "test_pc"), field(10, "x")), ("5".into(), "00000000".into()));
-        assert_eq!((field(11, "test_pc"), field(11, "x")), ("6".into(), "ffffffff".into()));
-        assert_eq!(field(16, "test_pc"), "6");
+        assert_eq!(
+            (field(1, "sm0_pc"), field(1, "sm0_x"), field(1, "sm1_pc")),
+            ("5".into(), "00000003".into(), "".into())
+        );
+        assert_eq!((field(10, "sm0_pc"), field(10, "sm0_x")), ("5".into(), "00000000".into()));
+        assert_eq!((field(11, "sm0_pc"), field(11, "sm0_x")), ("6".into(), "ffffffff".into()));
+        assert_eq!(field(16, "sm0_pc"), "6");
+        let sm2_x: Vec<String> = (1..=16).map(|tick| field(tick, "sm2_x")).collect();
+        assert_eq!(sm2_x.iter().map(|x| &x[7..]).collect::<String>(), "3322222221111111");
     }
     #[test]
     fn cases_match_fixtures() {

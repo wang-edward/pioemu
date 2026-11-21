@@ -1,91 +1,8 @@
-use arbitrary_int::{u1, u5};
-use pioemu::instr::{self, Condition::*, Instruction::*, set::Destn as SetDestn, wait::Source as WaitSource};
 use pioemu::state;
 
-macro_rules! pio {
-    // === set with delay ===
-    (set $destn:tt, $val:literal [$delay:literal]) => {{
-        let mut i = pio!(set $destn, $val);
-        i.delay = u5::new($delay);
-        i
-    }};
-    // === jmp with delay ===
-    (jmp $addr:literal [$delay:literal]) => {{
-        let mut i = pio!(jmp $addr);
-        i.delay = u5::new($delay);
-        i
-    }};
-    (jmp !x, $addr:literal [$delay:literal]) => {{ let mut i = pio!(jmp !x, $addr); i.delay = u5::new($delay); i }};
-    (jmp !y, $addr:literal [$delay:literal]) => {{ let mut i = pio!(jmp !y, $addr); i.delay = u5::new($delay); i }};
-    (jmp x--, $addr:literal [$delay:literal]) => {{ let mut i = pio!(jmp x--, $addr); i.delay = u5::new($delay); i }};
-    (jmp y--, $addr:literal [$delay:literal]) => {{ let mut i = pio!(jmp y--, $addr); i.delay = u5::new($delay); i }};
-    (jmp x!=y, $addr:literal [$delay:literal]) => {{ let mut i = pio!(jmp x!=y, $addr); i.delay = u5::new($delay); i }};
-    (jmp pin, $addr:literal [$delay:literal]) => {{ let mut i = pio!(jmp pin, $addr); i.delay = u5::new($delay); i }};
-    (jmp !osre, $addr:literal [$delay:literal]) => {{ let mut i = pio!(jmp !osre, $addr); i.delay = u5::new($delay); i }};
-    // === wait with delay ===
-    (wait $pol:literal, $src:tt $idx:literal [$delay:literal]) => {{
-        let mut i = pio!(wait $pol, $src $idx);
-        i.delay = u5::new($delay);
-        i
-    }};
-
-    // === set ===
-    (set x, $val:literal) => {
-        instr::Instr { instruction: Set { destn: SetDestn::X, data: u5::new($val) }, delay: u5::new(0), side_set: None }
-    };
-    (set y, $val:literal) => {
-        instr::Instr { instruction: Set { destn: SetDestn::Y, data: u5::new($val) }, delay: u5::new(0), side_set: None }
-    };
-    (set pins, $val:literal) => {
-        instr::Instr { instruction: Set { destn: SetDestn::Pins, data: u5::new($val) }, delay: u5::new(0), side_set: None }
-    };
-    (set pindirs, $val:literal) => {
-        instr::Instr { instruction: Set { destn: SetDestn::PinDirs, data: u5::new($val) }, delay: u5::new(0), side_set: None }
-    };
-
-    // === jmp ===
-    (jmp $addr:literal) => {
-        instr::Instr { instruction: Jmp { condition: Always, address: u5::new($addr) }, delay: u5::new(0), side_set: None }
-    };
-    (jmp !x, $addr:literal) => {
-        instr::Instr { instruction: Jmp { condition: XZero, address: u5::new($addr) }, delay: u5::new(0), side_set: None }
-    };
-    (jmp !y, $addr:literal) => {
-        instr::Instr { instruction: Jmp { condition: YZero, address: u5::new($addr) }, delay: u5::new(0), side_set: None }
-    };
-    (jmp x--, $addr:literal) => {
-        instr::Instr { instruction: Jmp { condition: XDec, address: u5::new($addr) }, delay: u5::new(0), side_set: None }
-    };
-    (jmp y--, $addr:literal) => {
-        instr::Instr { instruction: Jmp { condition: YDec, address: u5::new($addr) }, delay: u5::new(0), side_set: None }
-    };
-    (jmp x!=y, $addr:literal) => {
-        instr::Instr { instruction: Jmp { condition: XNeqY, address: u5::new($addr) }, delay: u5::new(0), side_set: None }
-    };
-    (jmp pin, $addr:literal) => {
-        instr::Instr { instruction: Jmp { condition: Pin, address: u5::new($addr) }, delay: u5::new(0), side_set: None }
-    };
-    (jmp !osre, $addr:literal) => {
-        instr::Instr { instruction: Jmp { condition: OsrNotEmpty, address: u5::new($addr) }, delay: u5::new(0), side_set: None }
-    };
-
-    // === wait ===
-    (wait $pol:literal, gpio $idx:literal) => {
-        instr::Instr { instruction: Wait { polarity: u1::new($pol), source: WaitSource::Gpio, index: u5::new($idx) }, delay: u5::new(0), side_set: None }
-    };
-    (wait $pol:literal, pin $idx:literal) => {
-        instr::Instr { instruction: Wait { polarity: u1::new($pol), source: WaitSource::Pin, index: u5::new($idx) }, delay: u5::new(0), side_set: None }
-    };
-    (wait $pol:literal, irq $idx:literal) => {
-        instr::Instr { instruction: Wait { polarity: u1::new($pol), source: WaitSource::Irq, index: u5::new($idx) }, delay: u5::new(0), side_set: None }
-    };
-}
-
-fn setup(program: &[instr::Instr], en: [bool; 4]) -> state::Block {
+fn setup(program: &[u16], en: [bool; 4]) -> state::Block {
     let mut block = state::Block::new(true);
-    for (i, instr) in program.iter().enumerate() {
-        block.instr_mem[i] = Some(*instr);
-    }
+    block.instr_mem[..program.len()].copy_from_slice(program);
     for (i, sm) in block.sms.iter_mut().enumerate() {
         sm.enabled = en[i];
     }
@@ -98,7 +15,7 @@ fn sm0(block: &state::Block) -> &state::State {
 
 #[test]
 fn squarewave() {
-    let program = [pio!(set x, 1 [1]), pio!(set x, 0), pio!(jmp 0)];
+    let program = [0xe121, 0xe020, 0x0000];
     let mut block = setup(&program, [true, true, true, true]);
     let mut xs: Vec<[u32; 4]> = Vec::new();
     let expected = vec![
@@ -121,7 +38,7 @@ fn squarewave() {
 
 #[test]
 fn countdown() {
-    let program = [pio!(set x, 3), pio!(jmp x--, 1), pio!(set y, 31)];
+    let program = [0xe023, 0x0041, 0xe05f];
     let mut block = setup(&program, [true, false, false, false]);
     for _ in 0..5 {
         block.step();
@@ -134,7 +51,7 @@ fn countdown() {
 
 #[test]
 fn wait_gpio() {
-    let program = [pio!(wait 1, gpio 0), pio!(set x, 7)];
+    let program = [0x2080, 0xe027];
     let mut block = setup(&program, [true, false, false, false]);
     block.gpio_in = 0;
     for _ in 0..5 {
@@ -152,7 +69,7 @@ fn wait_gpio() {
 
 #[test]
 fn wait_zero() {
-    let program = [pio!(wait 0, gpio 3), pio!(set x, 5)];
+    let program = [0x2003, 0xe025];
     let mut block = setup(&program, [true, false, false, false]);
     block.gpio_in = 0b1000;
     for _ in 0..3 {
@@ -167,7 +84,7 @@ fn wait_zero() {
 
 #[test]
 fn delay_cycles() {
-    let program = [pio!(set x, 1 [3]), pio!(set x, 2)];
+    let program = [0xe321, 0xe022];
     let mut block = setup(&program, [true, false, false, false]);
     block.step();
     assert_eq!(sm0(&block).x, 1);
@@ -181,11 +98,65 @@ fn delay_cycles() {
 
 #[test]
 fn jmp_x_eq_y() {
-    let program = [pio!(set x, 5), pio!(set y, 5), pio!(jmp x!=y, 0), pio!(set x, 31)];
+    let program = [0xe025, 0xe045, 0x00a0, 0xe03f];
     let mut block = setup(&program, [true, false, false, false]);
     block.step(); // set x, 5
     block.step(); // set y, 5
     block.step(); // jmp x!=y — equal, no jump
     block.step(); // set x, 31
     assert_eq!(sm0(&block).x, 31);
+}
+
+#[test]
+fn fractional_clock_divider() {
+    for (clkdiv, expected) in [
+        (0x0002_8000, &[1, 3, 5, 8, 10, 13][..]),
+        (0x0001_4000, &[1, 2, 3, 4, 5, 7, 8, 9, 10, 12, 13]),
+    ] {
+        let mut block = setup(&[0x0040], [true, false, false, false]);
+        block.configure(0, clkdiv, 0, 0x000c_0000, 0x1400_0000);
+        let ticks: Vec<u32> = (1..=13)
+            .filter(|_| {
+                let x = block.sms[0].state.x;
+                block.step();
+                block.sms[0].state.x != x
+            })
+            .collect();
+        assert_eq!(ticks, expected);
+    }
+}
+
+#[test]
+fn delay_does_not_decode_next_instruction() {
+    let mut block = setup(&[0xe721, 0x800f], [true, false, false, false]);
+    for _ in 0..8 {
+        block.step();
+    }
+    assert_eq!(sm0(&block).pc.value(), 1);
+}
+
+#[test]
+fn disassembly() {
+    let config = state::Config::from_registers(0, 0, 0, 0);
+    let text = |word| pioemu::instr::Instr::decode(word, &config, false).to_string();
+    assert_eq!(text(0xc000), "irq 0");
+    assert_eq!(text(0xc010), "irq 0 rel");
+    assert_eq!(text(0xc008), "irq prev 0");
+    assert_eq!(text(0xc018), "irq next 0");
+    assert_eq!(text(0xc05b), "irq next clear 3");
+    assert_eq!(text(0xc034), "irq wait 4 rel");
+    assert_eq!(text(0x20d0), "wait 1 irq 0 rel");
+    assert_eq!(text(0x20ca), "wait 1 irq prev 2");
+    assert_eq!(text(0x205f), "wait 0 irq next 7");
+    assert_eq!(text(0x2060), "wait 0 jmppin");
+    assert_eq!(text(0x2065), "wait 0 jmppin + 5");
+    assert_eq!(text(0x2083), "wait 1 gpio 3");
+}
+
+#[test]
+#[should_panic(expected = "undefined: status_level_above_depth")]
+fn status_level_bit_4_is_checked() {
+    let mut block = setup(&[0xa025], [true, false, false, false]);
+    block.configure(0, 0x0001_0000, 0x10, 0x000c_0000, 0x1400_0000);
+    block.step();
 }

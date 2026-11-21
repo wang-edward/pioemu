@@ -1,4 +1,4 @@
-use pioemu::state::{bit_at, calc_irq_index, reverse, sat_shl, sat_shr, to_mask, wrap_shiftr};
+use pioemu::state::{bit_at, calc_irq_index, to_mask};
 
 #[test]
 fn test_to_mask() {
@@ -9,29 +9,9 @@ fn test_to_mask() {
 }
 
 #[test]
-fn test_wrap_shiftr() {
-    assert_eq!(wrap_shiftr(0x0000_000f, 4), 0xf000_0000);
-    assert_eq!(wrap_shiftr(0x0000_00ff, 4), 0xf000_000f);
-
-    assert_eq!(wrap_shiftr(0x1234_5678, 32), 0x1234_5678);
-    assert_eq!(wrap_shiftr(0x1234_5678, 0), 0x1234_5678);
-}
-
-#[test]
-fn test_reverse() {
-    assert_eq!(reverse(0x0000_010e), 0x7080_0000);
-}
-
-#[test]
-fn test_invert() {
-    // is ! logical not or bitwise?
-    assert_eq!(!0xffff_0000 as u32, 0x0000_ffff as u32);
-}
-
-#[test]
 fn test_irq_index() {
-    assert_eq!(calc_irq_index(0x11, 2), Some(3));
-    assert_eq!(calc_irq_index(0x13, 2), Some(1));
+    assert_eq!(calc_irq_index(0x11, 2), 3);
+    assert_eq!(calc_irq_index(0x13, 2), 1);
 }
 
 #[test]
@@ -39,10 +19,4 @@ fn test_bit_at() {
     assert_eq!(bit_at(0x11, 2), false);
     assert_eq!(bit_at(0x11, 0), true);
     assert_eq!(bit_at(0x11, 4), true);
-}
-
-#[test]
-fn test_overflow() {
-    assert_eq!(sat_shl(0xf000_0000, 1), 0xe000_0000);
-    assert_eq!(sat_shr(0x0000_000f, 1), 0x0000_0007);
 }
